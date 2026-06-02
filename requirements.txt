@@ -1,0 +1,6 @@
+yfinance
+xgboost
+tensorflow
+joblib
+numpy
+pandas

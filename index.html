@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ITUB4 — Painel de Previsão</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --border: #e8e8e4;
+    --text-primary: #1a1a18;
+    --text-secondary: #6b6b68;
+    --text-muted: #a8a8a4;
+    --up: #2d7a4f;
+    --up-bg: #edf7f1;
+    --down: #c0392b;
+    --down-bg: #fdf0ee;
+    --accent: #1a1a18;
+    --mono: 'DM Mono', monospace;
+    --sans: 'DM Sans', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text-primary);
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+
+  .container { max-width: 960px; margin: 0 auto; }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    margin-bottom: 32px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .header-left h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  .header-left p {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .header-right { text-align: right; }
+
+  .last-update {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .model-badge {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 3px 10px;
+    background: var(--accent);
+    color: white;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    border-radius: 2px;
+  }
+
+  .cards-top {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 22px;
+  }
+
+  .card-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+
+  .card-value {
+    font-family: var(--mono);
+    font-size: 28px;
+    font-weight: 500;
+    letter-spacing: -1px;
+    line-height: 1;
+  }
+
+  .card-value.up   { color: var(--up); }
+  .card-value.down { color: var(--down); }
+
+  .card-sub {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+  }
+
+  .direction-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 22px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  .direction-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+
+  .direction-icon.up   { background: var(--up-bg); }
+  .direction-icon.down { background: var(--down-bg); }
+
+  .direction-text strong {
+    font-size: 18px;
+    font-weight: 600;
+    display: block;
+    line-height: 1.2;
+  }
+
+  .direction-text strong.up   { color: var(--up); }
+  .direction-text strong.down { color: var(--down); }
+
+  .direction-text span {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .cards-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-bottom: 12px;
+  }
+
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .chart-title { font-size: 13px; font-weight: 500; }
+
+  .chart-legend { display: flex; gap: 16px; }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  .chart-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 3px;
+  }
+
+  .tab {
+    padding: 4px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    transition: all 0.15s;
+  }
+
+  .tab.active {
+    background: var(--surface);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+
+  canvas { max-height: 240px; }
+
+  .history-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+  }
+
+  .history-title { font-size: 13px; font-weight: 500; margin-bottom: 16px; }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+
+  thead th {
+    text-align: left;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+
+  tbody tr { border-bottom: 1px solid var(--bg); }
+  tbody tr:last-child { border-bottom: none; }
+  tbody td { padding: 9px 0; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .badge.up   { background: var(--up-bg);   color: var(--up); }
+  .badge.down { background: var(--down-bg); color: var(--down); }
+
+  .loading {
+    text-align: center;
+    padding: 60px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .footer {
+    margin-top: 24px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    text-align: center;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .card, .chart-card, .history-card, .direction-card {
+    animation: fadeIn 0.4s ease forwards;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="header-left">
+      <h1>ITUB4</h1>
+      <p>Itaú Unibanco · B3 · Previsão D-1</p>
+    </div>
+    <div class="header-right">
+      <div class="last-update" id="last-update">Carregando...</div>
+      <div class="model-badge">Modelo Híbrido XGBoost + LSTM</div>
+    </div>
+  </div>
+
+  <div id="main-content">
+    <div class="loading">Carregando dados...</div>
+  </div>
+
+  <div class="footer">ITUB4 · Modelo Híbrido XGBoost + LSTM · Expoente de Hurst · Atualização diária automática</div>
+</div>
+
+<script>
+let chart;
+let globalData = [];
+let currentRange = 30;
+
+function fmt(v) {
+  return (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+}
+
+function fmtDate(d) {
+  const [y, m, day] = d.split('-');
+  return `${day}/${m}/${y}`;
+}
+
+function setRange(n, btn) {
+  currentRange = n;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  updateChart();
+}
+
+function updateChart() {
+  const slice  = globalData.slice(-currentRange);
+  const labels = slice.map(d => fmtDate(d.date));
+  const real   = slice.map(d => +(d.real * 100).toFixed(4));
+  const pred   = slice.map(d => +(d.pred * 100).toFixed(4));
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = real;
+    chart.data.datasets[1].data = pred;
+    chart.update();
+    return;
+  }
+
+  const ctx = document.getElementById('returnChart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Real',     data: real, borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+        { label: 'Previsto', data: pred, borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, tension: 0.3, borderDash: [4, 3] }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#fff',
+          borderColor: '#e8e8e4',
+          borderWidth: 1,
+          titleColor: '#1a1a18',
+          bodyColor: '#6b6b68',
+          titleFont: { family: 'DM Mono', size: 11 },
+          bodyFont:  { family: 'DM Mono', size: 11 },
+          callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y > 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { font: { family: 'DM Mono', size: 10 }, color: '#a8a8a4', maxTicksLimit: 8 }
+        },
+        y: {
+          grid: { color: '#f0f0ec' },
+          ticks: {
+            font: { family: 'DM Mono', size: 10 },
+            color: '#a8a8a4',
+            callback: v => (v > 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderDashboard(data) {
+  globalData = data;
+  const latest = data[data.length - 1];
+
+  document.getElementById('last-update').textContent = `Atualizado em ${fmtDate(latest.date)}`;
+
+  const isUp = latest.pred >= 0;
+
+  document.getElementById('main-content').innerHTML = `
+    <div class="cards-top">
+      <div class="card">
+        <div class="card-label">Preço de Fechamento</div>
+        <div class="card-value">R$ ${latest.price.toFixed(2)}</div>
+        <div class="card-sub">${fmtDate(latest.date)}</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Retorno D-1 (Real)</div>
+        <div class="card-value ${latest.real >= 0 ? 'up' : 'down'}">${fmt(latest.real)}</div>
+        <div class="card-sub">variação observada</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Retorno Previsto D+1</div>
+        <div class="card-value ${latest.pred >= 0 ? 'up' : 'down'}">${fmt(latest.pred)}</div>
+        <div class="card-sub">modelo híbrido</div>
+      </div>
+    </div>
+
+    <div class="direction-card">
+      <div class="direction-icon ${isUp ? 'up' : 'down'}">${isUp ? '↑' : '↓'}</div>
+      <div class="direction-text">
+        <strong class="${isUp ? 'up' : 'down'}">${isUp ? 'Alta prevista para o próximo pregão' : 'Queda prevista para o próximo pregão'}</strong>
+        <span>Previsão baseada no modelo híbrido XGBoost + LSTM ponderado pelo Hurst</span>
+      </div>
+    </div>
+
+    <div class="cards-grid">
+      <div class="card">
+        <div class="card-label">RMSE (Teste)</div>
+        <div class="card-value" style="font-size:20px;">0,0058</div>
+        <div class="card-sub">modelo híbrido</div>
+      </div>
+      <div class="card">
+        <div class="card-label">MAE (Teste)</div>
+        <div class="card-value" style="font-size:20px;">0,0041</div>
+        <div class="card-sub">modelo híbrido</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Dir. Accuracy</div>
+        <div class="card-value" style="font-size:20px;">85,82%</div>
+        <div class="card-sub">conjunto de teste</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Expoente Hurst</div>
+        <div class="card-value" style="font-size:20px;">${latest.hurst.toFixed(3)}</div>
+        <div class="card-sub">${latest.hurst >= 0.5 ? 'Persistente (H ≥ 0,5)' : 'Anti-persistente (H < 0,5)'}</div>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Histórico de Retornos</span>
+        <div style="display:flex; align-items:center; gap:16px;">
+          <div class="chart-legend">
+            <div class="legend-item"><div class="legend-dot" style="background:#3b82f6;"></div> Real</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#10b981;"></div> Previsto</div>
+          </div>
+          <div class="chart-tabs">
+            <button class="tab active" onclick="setRange(30, this)">30d</button>
+            <button class="tab" onclick="setRange(60, this)">60d</button>
+            <button class="tab" onclick="setRange(90, this)">90d</button>
+          </div>
+        </div>
+      </div>
+      <canvas id="returnChart"></canvas>
+    </div>
+
+    <div class="history-card">
+      <div class="history-title">Histórico Recente</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Fechamento</th>
+            <th>Retorno Real</th>
+            <th>Retorno Previsto</th>
+            <th>Direção Prevista</th>
+            <th>Acertou?</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${[...data].reverse().slice(0, 10).map(d => {
+            const acertou = Math.sign(d.real) === Math.sign(d.pred);
+            return `
+              <tr>
+                <td>${fmtDate(d.date)}</td>
+                <td>R$ ${d.price.toFixed(2)}</td>
+                <td style="color:${d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
+                <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
+                <td><span class="badge ${d.pred >= 0 ? 'up' : 'down'}">${d.pred >= 0 ? '↑ Alta' : '↓ Queda'}</span></td>
+                <td style="color:${acertou ? 'var(--up)' : 'var(--down)'}; font-weight:500;">${acertou ? '✓' : '✗'}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  updateChart();
+}
+
+// =========================
+// CARREGA data.json
+// =========================
+fetch('data.json?nocache=' + Date.now())
+  .then(r => r.json())
+  .then(data => renderDashboard(data))
+  .catch(() => {
+    document.getElementById('main-content').innerHTML =
+      '<div class="loading">Erro ao carregar dados. Tente novamente.</div>';
+  });
+</script>
+</body>
+</html>
