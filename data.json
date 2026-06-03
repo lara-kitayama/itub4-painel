@@ -4,6 +4,8 @@
     "price": 34.68,
     "real": 0.0075,
     "pred": 0.0080,
+    "pred_price": 34.96,
+    "next_date": "2026-06-03",
     "hurst": 0.47
   }
 ]
