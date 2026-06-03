@@ -1,6 +1,6 @@
-yfinance
-xgboost
-tensorflow
-joblib
-numpy
-pandas
+numpy==1.26.4
+pandas==2.2.3
+joblib==1.4.2
+yfinance==0.2.65
+xgboost==2.1.4
+tensorflow==2.15.0
