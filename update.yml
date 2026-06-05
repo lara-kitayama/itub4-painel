@@ -2,9 +2,11 @@ name: Atualização Diária ITUB4
 
 on:
   schedule:
-    # Roda de segunda a sexta às 19h horário de Brasília (22h UTC)
-    - cron: '0 22 * * 1-5'
-  workflow_dispatch: # permite rodar manualmente pelo GitHub
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   update:
@@ -12,16 +14,15 @@ jobs:
 
     steps:
       - name: Checkout repositório
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configura Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Instala dependências
-        run: |
-          pip install yfinance xgboost tensorflow joblib numpy pandas
+        run: pip install yfinance xgboost tensorflow joblib numpy pandas
 
       - name: Roda o script de atualização
         run: python update.py
