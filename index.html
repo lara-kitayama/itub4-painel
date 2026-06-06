@@ -329,6 +329,18 @@ let chart;
 let globalData = [];
 let currentRange = 30;
 
+function nextBusinessDay(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + 1);
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() + 1);
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function fmt(v) {
   return (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
 }
@@ -418,14 +430,16 @@ function renderDashboard(data) {
 
   document.getElementById('last-update').textContent = `Atualizado em ${fmtDate(today.date)}`;
 
-  const d1Date      = today.next_date  || '—';
+  const d1Date      = nextBusinessDay(today.date);
   const d1Pred      = today.pred;
+  // ✅ CORRIGIDO: calcula preço previsto a partir do preço atual + retorno previsto
   const d1PredPrice = today.price * (1 + today.pred);
 
   const d0Date      = today.date;
   const d0Real      = today.real;
   const d0RealPrice = today.price;
-  const d0Pred      = yesterday ? yesterday.pred       : null;
+  const d0Pred      = yesterday ? yesterday.pred : null;
+  // ✅ CORRIGIDO: calcula preço previsto de ontem
   const d0PredPrice = yesterday ? yesterday.price * (1 + yesterday.pred) : null;
   const d0Hit       = (d0Pred !== null) ? (Math.sign(d0Real) === Math.sign(d0Pred)) : null;
 
@@ -433,14 +447,14 @@ function renderDashboard(data) {
 
     <div class="section-title">
       D+1 — Como será amanhã?
-      <span class="section-date">${d1Date !== '—' ? fmtDate(d1Date) : '—'}</span>
+      <span class="section-date">${fmtDate(d1Date)}</span>
     </div>
 
     <div class="bignums bignums-d1">
       <div class="bignum">
         <div class="bignum-label">Próximo Fechamento Previsto</div>
-        <div class="bignum-value neutral">${d1PredPrice ? fmtPrice(d1PredPrice) : '—'}</div>
-        <div class="bignum-sub">estimativa para ${d1Date !== '—' ? fmtDate(d1Date) : '—'}</div>
+        <div class="bignum-value ${dirClass(d1Pred)}">${fmtPrice(d1PredPrice)}</div>
+        <div class="bignum-sub">estimativa para ${fmtDate(d1Date)}</div>
       </div>
       <div class="bignum">
         <div class="bignum-label">Próximo Retorno Previsto</div>
@@ -462,7 +476,7 @@ function renderDashboard(data) {
       </div>
     </div>
 
-    <div class="section-title" style="margin-top:32px;">
+    <div class="section-title">
       D0 — Como foi hoje?
       <span class="section-date">${fmtDate(d0Date)}</span>
     </div>
@@ -483,12 +497,12 @@ function renderDashboard(data) {
         <div class="bignum-value ${dirClass(d0Real)}">${d0Real >= 0 ? 'ALTA' : 'QUEDA'}</div>
         <div class="bignum-sub">direção observada</div>
       </div>
-        <div class="bignum">
+      <div class="bignum">
         <div class="bignum-label">Último Fechamento Previsto</div>
-        <div class="bignum-value neutral">${d0PredPrice ? fmtPrice(d0PredPrice) : '—'}</div>
+        <div class="bignum-value ${d0PredPrice ? dirClass(d0Pred) : 'neutral'}">${d0PredPrice ? fmtPrice(d0PredPrice) : '—'}</div>
         <div class="bignum-sub">estimativa feita ontem</div>
       </div>
-        <div class="bignum">
+      <div class="bignum">
         <div class="bignum-label">Último Retorno Previsto</div>
         <div class="bignum-value ${d0Pred !== null ? dirClass(d0Pred) : 'neutral'}">${d0Pred !== null ? fmt(d0Pred) : '—'}</div>
         <div class="bignum-sub">previsão feita ontem</div>
@@ -500,24 +514,25 @@ function renderDashboard(data) {
       </div>
     </div>
 
-    ${d0Hit !== null ? `
     <div class="accuracy-row">
-      <span class="accuracy-badge ${d0Hit ? 'hit' : 'miss'}">${d0Hit ? '✓ Acertou' : '✗ Errou'} a direção</span>
-      <span class="accuracy-label">o modelo ${d0Hit ? 'acertou' : 'errou'} a direção do pregão de ${fmtDate(d0Date)}</span>
-    </div>` : ''}
-
-    <div class="section-title" style="margin-top:36px;">
-      Histórico do Modelo — Métricas de Avaliação
+      ${d0Hit === null
+        ? `<span class="accuracy-badge none">— Pendente</span><span class="accuracy-label">resultado ainda não disponível</span>`
+        : d0Hit
+          ? `<span class="accuracy-badge hit">✓ Acertou a direção</span><span class="accuracy-label">o modelo acertou a direção do pregão de ${fmtDate(d0Date)}</span>`
+          : `<span class="accuracy-badge miss">✗ Errou a direção</span><span class="accuracy-label">o modelo errou a direção do pregão de ${fmtDate(d0Date)}</span>`
+      }
     </div>
+
+    <div class="section-title">Histórico do Modelo — Métricas de Avaliação</div>
 
     <div class="metrics-grid">
       <div class="metric-card">
-        <div class="metric-label">RMSE</div>
+        <div class="metric-label">RMSE (Teste)</div>
         <div class="metric-value">0,0058</div>
         <div class="metric-sub">modelo híbrido</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">MAE</div>
+        <div class="metric-label">MAE (Teste)</div>
         <div class="metric-value">0,0041</div>
         <div class="metric-sub">modelo híbrido</div>
       </div>
@@ -527,7 +542,7 @@ function renderDashboard(data) {
         <div class="metric-sub">conjunto de teste</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">Expoente Hurst</div>
+        <div class="metric-label">Hurst Atual</div>
         <div class="metric-value">${today.hurst.toFixed(3)}</div>
         <div class="metric-sub">${today.hurst >= 0.5 ? 'Persistente (H ≥ 0,5)' : 'Anti-persistente (H < 0,5)'}</div>
       </div>
@@ -535,16 +550,16 @@ function renderDashboard(data) {
 
     <div class="chart-card">
       <div class="chart-header">
-        <span class="chart-title">Histórico de Retornos — Real vs Previsto</span>
-        <div style="display:flex; align-items:center; gap:14px;">
+        <span class="chart-title">Histórico de Retornos</span>
+        <div style="display:flex;align-items:center;gap:14px;">
           <div class="chart-legend">
-            <div class="legend-item"><div class="legend-dot" style="background:#3b82f6;"></div> Real</div>
-            <div class="legend-item"><div class="legend-dot" style="background:#10b981;"></div> Previsto</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#3b82f6;"></div>Real</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#10b981;"></div>Previsto</div>
           </div>
           <div class="chart-tabs">
             <button class="tab active" onclick="setRange(30,this)">30d</button>
-            <button class="tab"        onclick="setRange(60,this)">60d</button>
-            <button class="tab"        onclick="setRange(90,this)">90d</button>
+            <button class="tab" onclick="setRange(60,this)">60d</button>
+            <button class="tab" onclick="setRange(90,this)">90d</button>
           </div>
         </div>
       </div>
@@ -557,30 +572,27 @@ function renderDashboard(data) {
         <thead>
           <tr>
             <th>Data</th>
-            <th>Fechamento Real</th>
+            <th>Fechamento</th>
+            <th>Fech. Previsto</th>
             <th>Retorno Real</th>
             <th>Retorno Previsto</th>
-            <th>Sentido Previsto</th>
+            <th>Direção Prevista</th>
             <th>Acertou?</th>
           </tr>
         </thead>
         <tbody>
-          ${[...data].reverse().slice(0, 15).map((d, i) => {
-            const prevEntry = i < data.length - 1 ? [...data].reverse()[i + 1] : null;
-            const thisPred  = prevEntry ? prevEntry.pred : null;
-            const acertou   = thisPred !== null ? Math.sign(d.real) === Math.sign(thisPred) : null;
-            return `
-            <tr>
+          ${[...data].reverse().slice(0, 15).map((d, i, arr) => {
+            const next = arr[i - 1];
+            const acertou = next ? (Math.sign(next.real) === Math.sign(d.pred) ? 'hit' : 'miss') : 'pending';
+            const acertouLabel = acertou === 'hit' ? '✓' : acertou === 'miss' ? '✗' : '—';
+            return `<tr>
               <td>${fmtDate(d.date)}</td>
-              <td>R$ ${d.price.toFixed(2)}</td>
+              <td>${fmtPrice(d.price)}</td>
+              <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmtPrice(d.price * (1 + d.pred))}</td>
               <td style="color:${d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
-              <td style="color:${thisPred !== null ? (thisPred >= 0 ? 'var(--up)' : 'var(--down)') : 'var(--text-muted)'}">
-                ${thisPred !== null ? fmt(thisPred) : '—'}
-              </td>
-              <td>${thisPred !== null ? `<span class="badge ${thisPred >= 0 ? 'up' : 'down'}">${dirLabel(thisPred)}</span>` : '<span class="badge pending">—</span>'}</td>
-              <td>${acertou !== null
-                ? `<span class="badge ${acertou ? 'hit' : 'miss'}">${acertou ? '✓' : '✗'}</span>`
-                : '<span class="badge pending">—</span>'}</td>
+              <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
+              <td><span class="badge ${dirClass(d.pred)}">${dirLabel(d.pred)}</span></td>
+              <td><span class="badge ${acertou}">${acertouLabel}</span></td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -592,11 +604,11 @@ function renderDashboard(data) {
 }
 
 fetch('data.json?nocache=' + Date.now())
-  .then(r => r.json())
+  .then(r => { if (!r.ok) throw new Error(); return r.json(); })
   .then(data => renderDashboard(data))
   .catch(() => {
     document.getElementById('main-content').innerHTML =
-      '<div class="loading">Erro ao carregar dados. Tente novamente.</div>';
+      '<div class="loading">Erro ao carregar dados.</div>';
   });
 </script>
 </body>
