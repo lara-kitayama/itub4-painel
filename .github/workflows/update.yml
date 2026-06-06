@@ -2,8 +2,11 @@ name: Atualização Diária ITUB4
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5'
+    - cron: "0 11 * * 1-5"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   update:
@@ -11,24 +14,25 @@ jobs:
 
     steps:
       - name: Checkout repositório
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Configura Python
-        uses: actions/setup-python@v4
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Instala dependências
+      - name: Instalar dependências
         run: |
-          pip install yfinance xgboost tensorflow joblib numpy pandas
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Roda o script de atualização
+      - name: Rodar update.py
         run: python update.py
 
-      - name: Commit e push do data.json atualizado
+      - name: Commit e push do data.json
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data.json
-          git diff --staged --quiet || git commit -m "chore: atualiza previsão ITUB4 $(date +'%Y-%m-%d')"
+          git diff --cached --quiet || git commit -m "chore: atualiza data.json $(date +'%Y-%m-%d %H:%M UTC')"
           git push
