@@ -75,7 +75,30 @@ def compute_features(df):
 def run():
     print('Carregando modelos...')
     model_xgb  = joblib.load('model_xgb.pkl')
-    model_lstm = tf.keras.models.load_model('model_lstm.keras')
+    import json
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+
+# Reconstrói o modelo do zero e carrega os pesos
+with open('lstm_config.json', 'r') as f:
+    config = json.load(f)
+
+model_lstm = Sequential([
+    LSTM(128, input_shape=(1, len(FEATURES)), return_sequences=True),
+    BatchNormalization(),
+    Dropout(0.3),
+    LSTM(64, return_sequences=True),
+    BatchNormalization(),
+    Dropout(0.2),
+    LSTM(32, return_sequences=False),
+    BatchNormalization(),
+    Dropout(0.2),
+    Dense(32, activation='relu'),
+    Dense(16, activation='relu'),
+    Dense(1)
+])
+
+model_lstm.load_weights('lstm_weights.weights.h5')
     scaler_X   = joblib.load('scaler_X.pkl')
     scaler_y   = joblib.load('scaler_y.pkl')
 
