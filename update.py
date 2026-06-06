@@ -1,14 +1,11 @@
 """
 update.py — Atualização diária ITUB4
-Baixa dados, calcula features, roda modelo híbrido XGBoost + LSTM,
-salva data.json para o painel.
+Modelo fiel ao TCC: X[i] → y[i] (mesmo dia), 25 features com Hurst,
+ponderação híbrida XGBoost + LSTM pelo Expoente de Hurst.
 
-CORREÇÕES APLICADAS:
+CORREÇÕES EM RELAÇÃO AO ORIGINAL:
   1. Hurst: removida raiz quadrada errada (era sqrt(std), correto é std)
-  2. ATR: substituído por proxy de volatilidade (sem High/Low no dataset)
-  3. Hurst removido de FEATURES_25 (evita redundância com ponderação híbrida)
-  4. Alinhamento D+1 correto: X[i] prevê retorno de [i+1]
-  5. real=None tratado corretamente no print final
+  2. real=None tratado no print final
 """
 
 import json
@@ -56,41 +53,34 @@ itub4["Retorno"] = itub4["Close"].pct_change()
 print(f"ITUB4: {itub4.shape[0]} pregões — {itub4.index[0].date()} → {itub4.index[-1].date()}")
 
 # ──────────────────────────────────────────
-# 2. FEATURE ENGINEERING
+# 2. FEATURE ENGINEERING (igual ao TCC)
 # ──────────────────────────────────────────
 df = itub4.copy()
 
-# Lags de retorno
 for lag in [1, 2, 3, 5, 10, 20]:
     df[f"return_lag_{lag}"] = df["Retorno"].shift(lag)
 
-# Médias móveis simples
 for w in [5, 10, 20, 50, 200]:
     df[f"sma_{w}"] = df["Close"].rolling(w).mean()
 
-# Médias móveis exponenciais
 for w in [5, 10, 20]:
     df[f"ema_{w}"] = df["Close"].ewm(span=w, adjust=False).mean()
 
-# Volatilidade rolling
 for w in [5, 10, 20]:
     df[f"volatility_{w}"] = df["Retorno"].rolling(w).std()
 
-# RSI 14
 delta = df["Close"].diff()
 gain  = delta.clip(lower=0).rolling(14).mean()
 loss  = (-delta.clip(upper=0)).rolling(14).mean()
 rs    = gain / loss
 df["rsi_14"] = 100 - (100 / (1 + rs))
 
-# MACD
 ema12 = df["Close"].ewm(span=12, adjust=False).mean()
 ema26 = df["Close"].ewm(span=26, adjust=False).mean()
 df["macd"]        = ema12 - ema26
 df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 df["macd_hist"]   = df["macd"] - df["macd_signal"]
 
-# Bollinger Bands 20
 sma20 = df["Close"].rolling(20).mean()
 std20 = df["Close"].rolling(20).std()
 df["bb_upper"] = sma20 + 2 * std20
@@ -98,48 +88,35 @@ df["bb_lower"] = sma20 - 2 * std20
 df["bb_width"] = df["bb_upper"] - df["bb_lower"]
 df["bb_pct"]   = (df["Close"] - df["bb_lower"]) / df["bb_width"]
 
-# CORREÇÃO: ATR aproximado via retorno absoluto rolling (sem High/Low no dataset)
-df["atr_14"] = df["Retorno"].abs().rolling(14).mean()
+high_low     = df["Close"].rolling(2).max() - df["Close"].rolling(2).min()
+df["atr_14"] = high_low.rolling(14).mean()
 
-# Volume relativo
 df["vol_rel"]    = df["Volume"] / df["Volume"].rolling(20).mean()
 df["vol_sma_20"] = df["Volume"].rolling(20).mean()
 
-# Calendário
 df["day_of_week"]    = df.index.dayofweek
 df["month"]          = df.index.month
 df["quarter"]        = df.index.quarter
 df["is_month_start"] = df.index.is_month_start.astype(int)
 df["is_month_end"]   = df.index.is_month_end.astype(int)
 
-# Dados externos
 df["ibov_ret"]  = ibov_close.pct_change().reindex(df.index)
 df["dolar_ret"] = dolar_close.pct_change().reindex(df.index)
 df["vix"]       = vix_close.reindex(df.index)
 
 # ──────────────────────────────────────────
-# CORREÇÃO: Hurst correto (sem sqrt)
-# Usado APENAS como ponderador — fora das features do modelo
+# CORREÇÃO 1: Hurst correto (sem sqrt)
 # ──────────────────────────────────────────
 def hurst_exp(series, min_lag=2, max_lag=20):
-    """
-    Expoente de Hurst pela análise de dispersão.
-    tau = std puro (sem sqrt).
-    Resultado: entre 0 e 1.
-      H > 0.5 → persistente (tendência)
-      H < 0.5 → anti-persistente (reversão)
-      H ≈ 0.5 → random walk
-    """
     ts = np.array(series.dropna())
     if len(ts) < max_lag:
         return 0.5
     lags = range(min_lag, max_lag)
-    tau = [np.std(np.subtract(ts[lag:], ts[:-lag])) for lag in lags]
+    tau  = [np.std(np.subtract(ts[lag:], ts[:-lag])) for lag in lags]
     if all(t == 0 for t in tau):
         return 0.5
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
-    h = float(poly[0] * 2.0)
-    return float(np.clip(h, 0.0, 1.0))
+    return float(np.clip(poly[0] * 2.0, 0.0, 1.0))
 
 print("Calculando Hurst (pode demorar ~30s)...")
 hurst_values = []
@@ -155,7 +132,7 @@ df["hurst_252"] = hurst_values
 print("Features calculadas.")
 
 # ──────────────────────────────────────────
-# 3. RENOMEIA COLUNAS
+# 3. RENOMEIA COLUNAS (igual ao TCC)
 # ──────────────────────────────────────────
 rename_map = {
     "ibov_ret"     : "Retorno Ibovespa",
@@ -187,8 +164,8 @@ rename_map = {
 
 df = df.rename(columns=rename_map)
 
-# CORREÇÃO: Hurst fora das features (só usado como ponderador híbrido)
-FEATURES_24 = [
+# 25 features igual ao TCC
+FEATURES_25 = [
     "Retorno Ibovespa", "VIX", "Retorno Dólar",
     "Bollinger %", "Bollinger Largura", "MACD", "MACD Histograma",
     "RSI 14", "ATR 14",
@@ -197,22 +174,21 @@ FEATURES_24 = [
     "Retorno Lag 1", "Retorno Lag 2", "Retorno Lag 3",
     "Retorno Lag 5", "Retorno Lag 10", "Retorno Lag 20",
     "MMS 200", "MME 5", "MME 20",
+    "Hurst 252",
 ]
 
-df_feat = df[FEATURES_24 + ["Hurst 252", "Retorno", "Close"]].dropna().copy()
-print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES_24)} features")
+df_feat = df[FEATURES_25 + ["Retorno", "Close"]].dropna().copy()
+print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES_25)} features")
 
 # ──────────────────────────────────────────
-# 4. ALINHAMENTO D+1 CORRETO
-# X[i] → features do dia i
-# y[i] → retorno do dia i+1
+# 4. X[i] → y[i] (fiel ao TCC)
 # ──────────────────────────────────────────
-X_raw     = df_feat[FEATURES_24].values[:-1]
-y_raw     = df_feat["Retorno"].values[1:]
-hurst_raw = df_feat["Hurst 252"].values[:-1]
+X_raw     = df_feat[FEATURES_25].values
+y_raw     = df_feat["Retorno"].values
+hurst_raw = df_feat["Hurst 252"].values
 
 # ──────────────────────────────────────────
-# 5. TREINO / TESTE (sem shuffle — série temporal)
+# 5. TREINO / TESTE
 # ──────────────────────────────────────────
 split = int(len(X_raw) * 0.8)
 X_train, X_test = X_raw[:split], X_raw[split:]
@@ -288,13 +264,12 @@ model_lstm.fit(
 print("LSTM treinado.")
 
 # ──────────────────────────────────────────
-# 8. MÉTRICAS DE AVALIAÇÃO
+# 8. MÉTRICAS
 # ──────────────────────────────────────────
-pred_xgb_test_sc  = model_xgb.predict(X_test_sc)
-pred_lstm_test_sc = model_lstm.predict(X_test_lstm, verbose=0).ravel()
-
-pred_xgb_test  = scaler_y.inverse_transform(pred_xgb_test_sc.reshape(-1, 1)).ravel()
-pred_lstm_test = scaler_y.inverse_transform(pred_lstm_test_sc.reshape(-1, 1)).ravel()
+pred_xgb_test  = scaler_y.inverse_transform(
+    model_xgb.predict(X_test_sc).reshape(-1, 1)).ravel()
+pred_lstm_test = scaler_y.inverse_transform(
+    model_lstm.predict(X_test_lstm, verbose=0).reshape(-1, 1)).ravel()
 
 hurst_test       = hurst_raw[split:]
 pred_hybrid_test = (1 - hurst_test) * pred_xgb_test + hurst_test * pred_lstm_test
@@ -324,7 +299,7 @@ pred_lstm_all = scaler_y.inverse_transform(
 pred_hybrid_all = (1 - hurst_raw) * pred_xgb_all + hurst_raw * pred_lstm_all
 
 # ──────────────────────────────────────────
-# 10. SALVA MODELOS E SCALERS
+# 10. SALVA MODELOS
 # ──────────────────────────────────────────
 joblib.dump(scaler_X, "scaler_X.pkl")
 joblib.dump(scaler_y, "scaler_y.pkl")
@@ -335,34 +310,27 @@ print("Modelos e scalers salvos.")
 # ──────────────────────────────────────────
 # 11. MONTA data.json
 #
-# records[k].date  = data do dia i+1 (dia em que o retorno ocorre)
-# records[k].price = preço de fechamento do dia i+1
-# records[k].real  = retorno real do dia i+1
-# records[k].pred  = previsão feita com dados do dia i, para o dia i+1
-# records[k].hurst = hurst calculado no dia i
-#
-# Último registro extra: previsão para o próximo pregão (real = None)
+# pred[i] = previsão do modelo para o dia i (com features do dia i)
+# real[i] = retorno que ocorreu no dia i
+# O painel usa pred[i] como "o que o modelo previu ontem para hoje"
+# e pred[último] como previsão para amanhã (D+1)
 # ──────────────────────────────────────────
 n_hist = 252
-
-df_base = df_feat.iloc[1:]    # dias i+1 (retorno real)
-
-idx_start = max(0, len(pred_hybrid_all) - n_hist)
+idx_start = max(0, len(df_feat) - n_hist)
 
 records = []
-for k in range(idx_start, len(pred_hybrid_all)):
+for k in range(idx_start, len(df_feat)):
     records.append({
-        "date" : df_base.index[k].strftime("%Y-%m-%d"),
-        "price": round(float(df_base["Close"].iloc[k]), 2),
-        "real" : round(float(df_base["Retorno"].iloc[k]), 6),
+        "date" : df_feat.index[k].strftime("%Y-%m-%d"),
+        "price": round(float(df_feat["Close"].iloc[k]), 2),
+        "real" : round(float(y_raw[k]), 6),
         "pred" : round(float(pred_hybrid_all[k]), 6),
         "hurst": round(float(hurst_raw[k]), 4),
     })
 
 # Registro D+1: previsão para o próximo pregão
 from pandas.tseries.offsets import BDay
-ultimo_idx   = df_feat.index[-1]
-proximo_dia  = (ultimo_idx + BDay(1)).strftime("%Y-%m-%d")
+proximo_dia = (df_feat.index[-1] + BDay(1)).strftime("%Y-%m-%d")
 
 records.append({
     "date" : proximo_dia,
