@@ -1,7 +1,7 @@
-numpy>=1.24
-pandas>=2.0
+numpy
+pandas
 yfinance>=0.2.40
-scikit-learn==1.3.2
-xgboost==2.0.3
-tensorflow==2.13.0
+scikit-learn>=1.6
+xgboost>=2.0
+tensorflow>=2.13
 joblib>=1.3
