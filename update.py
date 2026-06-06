@@ -6,6 +6,7 @@ salva data.json para o painel.
 
 import json
 import warnings
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -13,6 +14,7 @@ import joblib
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # ──────────────────────────────────────────
 # 1. DOWNLOAD DE DADOS
@@ -22,21 +24,29 @@ DATA_FIM    = datetime.today().strftime("%Y-%m-%d")
 
 print("Baixando dados...")
 
-itub4 = yf.download("ITUB4.SA",   start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)
-ibov  = yf.download("^BVSP",      start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
-dolar = yf.download("USDBRL=X",   start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
-vix   = yf.download("^VIX",       start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
+def baixar(ticker):
+    df = yf.download(ticker, start=DATA_INICIO, end=DATA_FIM,
+                     auto_adjust=True, progress=False)
+    # Achata MultiIndex (yfinance >= 0.2.x)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
 
-# Achata MultiIndex se necessário
-for series in [ibov, dolar, vix]:
-    if isinstance(series, pd.DataFrame):
-        series.columns = series.columns.get_level_values(0)
+itub4_raw = baixar("ITUB4.SA")
+ibov_raw  = baixar("^BVSP")
+dolar_raw = baixar("USDBRL=X")
+vix_raw   = baixar("^VIX")
 
-itub4.columns = itub4.columns.get_level_values(0)
-itub4 = itub4[["Close", "Volume"]].dropna()
+# Extrai Series de Close
+ibov_close  = ibov_raw["Close"].squeeze()
+dolar_close = dolar_raw["Close"].squeeze()
+vix_close   = vix_raw["Close"].squeeze()
+
+itub4 = itub4_raw[["Close", "Volume"]].copy()
+itub4 = itub4.dropna()
 itub4["Retorno"] = itub4["Close"].pct_change()
 
-print(f"ITUB4: {itub4.shape[0]} pregões de {itub4.index[0].date()} a {itub4.index[-1].date()}")
+print(f"ITUB4: {itub4.shape[0]} pregões — {itub4.index[0].date()} → {itub4.index[-1].date()}")
 
 # ──────────────────────────────────────────
 # 2. FEATURE ENGINEERING
@@ -47,11 +57,11 @@ df = itub4.copy()
 for lag in [1, 2, 3, 5, 10, 20]:
     df[f"return_lag_{lag}"] = df["Retorno"].shift(lag)
 
-# SMA
+# Médias móveis simples
 for w in [5, 10, 20, 50, 200]:
     df[f"sma_{w}"] = df["Close"].rolling(w).mean()
 
-# EMA
+# Médias móveis exponenciais
 for w in [5, 10, 20]:
     df[f"ema_{w}"] = df["Close"].ewm(span=w, adjust=False).mean()
 
@@ -85,8 +95,9 @@ df["bb_pct"]   = (df["Close"] - df["bb_lower"]) / df["bb_width"]
 high_low    = df["Close"].rolling(2).max() - df["Close"].rolling(2).min()
 df["atr_14"] = high_low.rolling(14).mean()
 
-# OBV
-df["obv"] = (np.sign(df["Retorno"]) * df["Volume"]).cumsum()
+# Volume relativo e MMS 20 de volume
+df["vol_rel"]    = df["Volume"] / df["Volume"].rolling(20).mean()
+df["vol_sma_20"] = df["Volume"].rolling(20).mean()
 
 # Calendário
 df["day_of_week"]    = df.index.dayofweek
@@ -95,32 +106,24 @@ df["quarter"]        = df.index.quarter
 df["is_month_start"] = df.index.is_month_start.astype(int)
 df["is_month_end"]   = df.index.is_month_end.astype(int)
 
-# Dados externos
-ibov_ret  = ibov.pct_change().rename("ibov_ret")
-dolar_ret = dolar.pct_change().rename("dolar_ret")
-vix_val   = vix.rename("vix")
-
-df = df.join(ibov_ret,  how="left")
-df = df.join(dolar_ret, how="left")
-df = df.join(vix_val,   how="left")
-
-# Volume relativo e MMS 20 de volume
-df["vol_rel"]    = df["Volume"] / df["Volume"].rolling(20).mean()
-df["vol_sma_20"] = df["Volume"].rolling(20).mean()
+# Dados externos — join por índice (evita rename em Series)
+df["ibov_ret"]  = ibov_close.pct_change().reindex(df.index)
+df["dolar_ret"] = dolar_close.pct_change().reindex(df.index)
+df["vix"]       = vix_close.reindex(df.index)
 
 # Expoente de Hurst (janela 252)
-def hurst_exp(series: pd.Series, min_lag: int = 2, max_lag: int = 20) -> float:
-    """Calcula o expoente de Hurst via R/S."""
+def hurst_exp(series, min_lag=2, max_lag=20):
     ts = np.array(series.dropna())
     if len(ts) < max_lag:
         return 0.5
-    lags  = range(min_lag, max_lag)
-    tau   = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    lags = range(min_lag, max_lag)
+    tau  = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
     if all(t == 0 for t in tau):
         return 0.5
-    poly  = np.polyfit(np.log(lags), np.log(tau), 1)
-    return poly[0] * 2.0
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return float(poly[0] * 2.0)
 
+print("Calculando Hurst (pode demorar ~30s)...")
 hurst_values = []
 win = 252
 for i in range(len(df)):
@@ -134,7 +137,7 @@ df["hurst_252"] = hurst_values
 print("Features calculadas.")
 
 # ──────────────────────────────────────────
-# 3. MAPEAMENTO PARA NOMES DO NOTEBOOK (pt-BR)
+# 3. RENOMEIA PARA NOMES DO NOTEBOOK (pt-BR)
 # ──────────────────────────────────────────
 rename_map = {
     "ibov_ret"     : "Retorno Ibovespa",
@@ -182,17 +185,14 @@ df_feat = df[FEATURES_25 + ["Retorno", "Close"]].dropna().copy()
 print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES_25)} features")
 
 # ──────────────────────────────────────────
-# 4. NORMALIZAÇÃO + MODELOS
+# 4. CARREGA MODELOS E GERA PREVISÕES
 # ──────────────────────────────────────────
 print("Carregando scalers e modelos...")
 
-scaler_X = joblib.load("scaler_X.pkl")
-scaler_y = joblib.load("scaler_y.pkl")
+scaler_X  = joblib.load("scaler_X.pkl")
+scaler_y  = joblib.load("scaler_y.pkl")
 model_xgb = joblib.load("model_xgb.pkl")
 
-# LSTM — tenta h5 primeiro, depois format SavedModel
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import tensorflow as tf
 
 if os.path.exists("model_lstm.h5"):
@@ -202,58 +202,49 @@ elif os.path.exists("model_lstm"):
 else:
     raise FileNotFoundError("Modelo LSTM não encontrado (model_lstm.h5 ou model_lstm/)")
 
-X_all    = df_feat[FEATURES_25].values
-X_sc     = scaler_X.transform(X_all)
-X_lstm   = X_sc.reshape((X_sc.shape[0], 1, X_sc.shape[1]))
+X_all  = df_feat[FEATURES_25].values
+X_sc   = scaler_X.transform(X_all)
+X_lstm = X_sc.reshape((X_sc.shape[0], 1, X_sc.shape[1]))
 
-# Previsões
 pred_xgb_sc  = model_xgb.predict(X_sc)
 pred_lstm_sc = model_lstm.predict(X_lstm, verbose=0).ravel()
 
 pred_xgb  = scaler_y.inverse_transform(pred_xgb_sc.reshape(-1, 1)).ravel()
 pred_lstm = scaler_y.inverse_transform(pred_lstm_sc.reshape(-1, 1)).ravel()
 
-# Ponderação pelo Hurst
-hurst = df_feat["Hurst 252"].values
-hurst = np.clip(hurst, 0, 1)
-peso_lstm = hurst
-peso_xgb  = 1 - hurst
-pred_hybrid = peso_xgb * pred_xgb + peso_lstm * pred_lstm
+# Ponderação dinâmica pelo Hurst
+hurst       = np.clip(df_feat["Hurst 252"].values, 0, 1)
+pred_hybrid = (1 - hurst) * pred_xgb + hurst * pred_lstm
 
 print("Previsões calculadas.")
 
 # ──────────────────────────────────────────
-# 5. MONTA data.json
+# 5. SALVA data.json
 # ──────────────────────────────────────────
-# Mantém os últimos 252 pregões (≈ 1 ano de histórico)
-n_hist = 252
-df_out = df_feat.iloc[-n_hist:].copy()
-pred_h = pred_hybrid[-n_hist:]
+n_hist  = 252
+df_out  = df_feat.iloc[-n_hist:].copy()
+pred_h  = pred_hybrid[-n_hist:]
 hurst_h = hurst[-n_hist:]
-
-# A previsão do dia D é para D+1 (retorno real do dia seguinte)
-# pred[i] foi gerada com features de D, observamos real em D+1
-real_returns = df_out["Retorno"].values
+real_r  = df_out["Retorno"].values
 
 records = []
 for i, (idx, row) in enumerate(df_out.iterrows()):
     records.append({
         "date" : idx.strftime("%Y-%m-%d"),
         "price": round(float(row["Close"]), 2),
-        "real" : round(float(real_returns[i]), 6),
+        "real" : round(float(real_r[i]), 6),
         "pred" : round(float(pred_h[i]), 6),
         "hurst": round(float(hurst_h[i]), 4),
     })
 
-# Salva
 with open("data.json", "w") as f:
     json.dump(records, f, ensure_ascii=False)
 
 latest = records[-1]
 print(f"\n✓ data.json salvo — {len(records)} registros")
-print(f"  Última data   : {latest['date']}")
-print(f"  Preço         : R$ {latest['price']:.2f}")
-print(f"  Retorno real  : {latest['real']*100:+.2f}%")
-print(f"  Previsão D+1  : {latest['pred']*100:+.2f}%")
-print(f"  Hurst         : {latest['hurst']:.3f}")
-print(f"  Direção       : {'↑ Alta' if latest['pred'] >= 0 else '↓ Queda'}")
+print(f"  Última data  : {latest['date']}")
+print(f"  Preço        : R$ {latest['price']:.2f}")
+print(f"  Retorno real : {latest['real']*100:+.2f}%")
+print(f"  Previsão D+1 : {latest['pred']*100:+.2f}%")
+print(f"  Hurst        : {latest['hurst']:.3f}")
+print(f"  Direção      : {'↑ Alta' if latest['pred'] >= 0 else '↓ Queda'}")
