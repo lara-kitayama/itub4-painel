@@ -75,7 +75,7 @@ def compute_features(df):
 def run():
     print('Carregando modelos...')
     model_xgb  = joblib.load('model_xgb.pkl')
-    model_lstm = tf.keras.models.load_model('model_lstm.h5')
+    model_lstm = tf.keras.models.load_model('model_lstm.keras')
     scaler_X   = joblib.load('scaler_X.pkl')
     scaler_y   = joblib.load('scaler_y.pkl')
 
