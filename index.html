@@ -420,13 +420,13 @@ function renderDashboard(data) {
 
   const d1Date      = today.next_date  || '—';
   const d1Pred      = today.pred;
-  const d1PredPrice = today.pred_price || null;
+  const d1PredPrice = today.price * (1 + today.pred);
 
   const d0Date      = today.date;
   const d0Real      = today.real;
   const d0RealPrice = today.price;
   const d0Pred      = yesterday ? yesterday.pred       : null;
-  const d0PredPrice = yesterday ? yesterday.pred_price : null;
+  const d0PredPrice = yesterday ? yesterday.price * (1 + yesterday.pred) : null;
   const d0Hit       = (d0Pred !== null) ? (Math.sign(d0Real) === Math.sign(d0Pred)) : null;
 
   document.getElementById('main-content').innerHTML = `
