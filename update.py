@@ -221,20 +221,9 @@ scaler_y = StandardScaler()
 y_train_sc = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
 y_test_sc  = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
 
-# ──────────────────────────────────────────
-# CORREÇÃO 3: XGBoost balanceado
-# scale_pos_weight = n_negativos / n_positivos
-# (usado via sample_weight para regressão, que não tem scale_pos_weight nativo)
-# ──────────────────────────────────────────
 n_pos = np.sum(y_train > 0)
 n_neg = np.sum(y_train <= 0)
-ratio = n_neg / n_pos if n_pos > 0 else 1.0
-
-# Para regressão, balanceamos via sample_weight:
-# dias de queda recebem peso maior para compensar sub-representação
-sample_weight = np.where(y_train <= 0, ratio, 1.0)
-
-print(f"Balanceamento XGBoost — Alta: {n_pos} dias | Queda: {n_neg} dias | ratio: {ratio:.2f}")
+print(f"XGBoost — Alta: {n_pos} dias | Queda: {n_neg} dias no treino")
 
 model_xgb = XGBRegressor(
     n_estimators=500,
@@ -251,7 +240,6 @@ model_xgb = XGBRegressor(
 )
 model_xgb.fit(
     X_train_sc, y_train_sc,
-    sample_weight=sample_weight,
     eval_set=[(X_test_sc, y_test_sc)],
     verbose=False,
 )
