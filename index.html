@@ -342,6 +342,7 @@ function nextBusinessDay(dateStr) {
 }
 
 function fmt(v) {
+  if (v === null || v === undefined) return '—';
   return (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
 }
 function fmtDate(d) {
@@ -363,7 +364,7 @@ function setRange(n, btn) {
 }
 
 function updateChart() {
-  const slice  = globalData.slice(-currentRange);
+  const slice  = globalData.filter(d => d.real !== null).slice(-currentRange);
   const labels = slice.map(d => fmtDate(d.date));
   const real   = slice.map(d => +(d.real * 100).toFixed(4));
   const pred   = slice.map(d => +(d.pred * 100).toFixed(4));
@@ -425,23 +426,30 @@ function updateChart() {
 function renderDashboard(data) {
   globalData = data;
 
-  const today     = data[data.length - 1];
-  const yesterday = data.length > 1 ? data[data.length - 2] : null;
+  // Último registro com real preenchido = D0
+  const dataComReal = data.filter(d => d.real !== null && d.real !== undefined);
+  const today       = dataComReal[dataComReal.length - 1];
+  const yesterday   = dataComReal.length > 1 ? dataComReal[dataComReal.length - 2] : null;
+
+  // Registro D+1 (real = null)
+  const nextDay = data[data.length - 1].real === null ? data[data.length - 1] : null;
 
   document.getElementById('last-update').textContent = `Atualizado em ${fmtDate(today.date)}`;
 
-  const d1Date      = nextBusinessDay(today.date);
-  const d1Pred      = today.pred;
-  // ✅ CORRIGIDO: calcula preço previsto a partir do preço atual + retorno previsto
-  const d1PredPrice = today.price * (1 + today.pred);
+  const d1Date      = nextDay ? nextDay.date : nextBusinessDay(today.date);
+  const d1Pred      = nextDay ? nextDay.pred : today.pred;
+  const d1PredPrice = today.price * (1 + d1Pred);
 
   const d0Date      = today.date;
   const d0Real      = today.real;
   const d0RealPrice = today.price;
   const d0Pred      = yesterday ? yesterday.pred : null;
-  // ✅ CORRIGIDO: calcula preço previsto de ontem
   const d0PredPrice = yesterday ? yesterday.price * (1 + yesterday.pred) : null;
-  const d0Hit       = (d0Pred !== null) ? (Math.sign(d0Real) === Math.sign(d0Pred)) : null;
+
+  // Acerto: compara pred e real do mesmo dia (today)
+  const d0Hit = (d0Real !== null && d0Real !== undefined && today.pred !== null)
+    ? (Math.sign(d0Real) === Math.sign(today.pred))
+    : null;
 
   document.getElementById('main-content').innerHTML = `
 
@@ -581,15 +589,16 @@ function renderDashboard(data) {
           </tr>
         </thead>
         <tbody>
-          ${[...data].reverse().slice(0, 15).map((d, i, arr) => {
-            const next = arr[i - 1];
-            const acertou = next ? (Math.sign(next.real) === Math.sign(d.pred) ? 'hit' : 'miss') : 'pending';
+          ${[...data].reverse().slice(0, 15).map((d) => {
+            const acertou = (d.real === null || d.real === undefined)
+              ? 'pending'
+              : (Math.sign(d.real) === Math.sign(d.pred) ? 'hit' : 'miss');
             const acertouLabel = acertou === 'hit' ? '✓' : acertou === 'miss' ? '✗' : '—';
             return `<tr>
               <td>${fmtDate(d.date)}</td>
               <td>${fmtPrice(d.price)}</td>
               <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmtPrice(d.price * (1 + d.pred))}</td>
-              <td style="color:${d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
+              <td style="color:${d.real !== null && d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
               <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
               <td><span class="badge ${dirClass(d.pred)}">${dirLabel(d.pred)}</span></td>
               <td><span class="badge ${acertou}">${acertouLabel}</span></td>
