@@ -1,170 +1,259 @@
 """
 update.py — Atualização diária ITUB4
-Roda às 8h (Brasília) via GitHub Actions
+Baixa dados, calcula features, roda modelo híbrido XGBoost + LSTM,
+salva data.json para o painel.
 """
 
-import json, numpy as np, pandas as pd, yfinance as yf
-import joblib, tensorflow as tf
-from datetime import datetime, timedelta
-import os, warnings
-warnings.filterwarnings('ignore')
+import json
+import warnings
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import joblib
+from datetime import datetime
 
-TICKER      = 'ITUB4.SA'
-LOOKBACK    = 252
-DATA_FILE   = 'data.json'
-MAX_HISTORY = 90
+warnings.filterwarnings("ignore")
 
-FEATURES = [
-    'Retorno Ibovespa', 'VIX', 'Retorno Dólar',
-    'Bollinger %', 'Bollinger Largura',
-    'MACD', 'MACD Histograma', 'RSI 14', 'ATR 14',
-    'Volatilidade 5', 'Volatilidade 10', 'Volatilidade 20',
-    'Volume', 'Volume Relativo', 'Volume MMS 20',
-    'Retorno Lag 1', 'Retorno Lag 2', 'Retorno Lag 3',
-    'Retorno Lag 5', 'Retorno Lag 10', 'Retorno Lag 20',
-    'MMS 200', 'MME 5', 'MME 20', 'Hurst 252'
+# ──────────────────────────────────────────
+# 1. DOWNLOAD DE DADOS
+# ──────────────────────────────────────────
+DATA_INICIO = "2010-01-01"
+DATA_FIM    = datetime.today().strftime("%Y-%m-%d")
+
+print("Baixando dados...")
+
+itub4 = yf.download("ITUB4.SA",   start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)
+ibov  = yf.download("^BVSP",      start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
+dolar = yf.download("USDBRL=X",   start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
+vix   = yf.download("^VIX",       start=DATA_INICIO, end=DATA_FIM, auto_adjust=True)["Close"]
+
+# Achata MultiIndex se necessário
+for series in [ibov, dolar, vix]:
+    if isinstance(series, pd.DataFrame):
+        series.columns = series.columns.get_level_values(0)
+
+itub4.columns = itub4.columns.get_level_values(0)
+itub4 = itub4[["Close", "Volume"]].dropna()
+itub4["Retorno"] = itub4["Close"].pct_change()
+
+print(f"ITUB4: {itub4.shape[0]} pregões de {itub4.index[0].date()} a {itub4.index[-1].date()}")
+
+# ──────────────────────────────────────────
+# 2. FEATURE ENGINEERING
+# ──────────────────────────────────────────
+df = itub4.copy()
+
+# Lags de retorno
+for lag in [1, 2, 3, 5, 10, 20]:
+    df[f"return_lag_{lag}"] = df["Retorno"].shift(lag)
+
+# SMA
+for w in [5, 10, 20, 50, 200]:
+    df[f"sma_{w}"] = df["Close"].rolling(w).mean()
+
+# EMA
+for w in [5, 10, 20]:
+    df[f"ema_{w}"] = df["Close"].ewm(span=w, adjust=False).mean()
+
+# Volatilidade rolling
+for w in [5, 10, 20]:
+    df[f"volatility_{w}"] = df["Retorno"].rolling(w).std()
+
+# RSI 14
+delta = df["Close"].diff()
+gain  = delta.clip(lower=0).rolling(14).mean()
+loss  = (-delta.clip(upper=0)).rolling(14).mean()
+rs    = gain / loss
+df["rsi_14"] = 100 - (100 / (1 + rs))
+
+# MACD
+ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+df["macd"]        = ema12 - ema26
+df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+df["macd_hist"]   = df["macd"] - df["macd_signal"]
+
+# Bollinger Bands 20
+sma20 = df["Close"].rolling(20).mean()
+std20 = df["Close"].rolling(20).std()
+df["bb_upper"] = sma20 + 2 * std20
+df["bb_lower"] = sma20 - 2 * std20
+df["bb_width"] = df["bb_upper"] - df["bb_lower"]
+df["bb_pct"]   = (df["Close"] - df["bb_lower"]) / df["bb_width"]
+
+# ATR 14
+high_low    = df["Close"].rolling(2).max() - df["Close"].rolling(2).min()
+df["atr_14"] = high_low.rolling(14).mean()
+
+# OBV
+df["obv"] = (np.sign(df["Retorno"]) * df["Volume"]).cumsum()
+
+# Calendário
+df["day_of_week"]    = df.index.dayofweek
+df["month"]          = df.index.month
+df["quarter"]        = df.index.quarter
+df["is_month_start"] = df.index.is_month_start.astype(int)
+df["is_month_end"]   = df.index.is_month_end.astype(int)
+
+# Dados externos
+ibov_ret  = ibov.pct_change().rename("ibov_ret")
+dolar_ret = dolar.pct_change().rename("dolar_ret")
+vix_val   = vix.rename("vix")
+
+df = df.join(ibov_ret,  how="left")
+df = df.join(dolar_ret, how="left")
+df = df.join(vix_val,   how="left")
+
+# Volume relativo e MMS 20 de volume
+df["vol_rel"]    = df["Volume"] / df["Volume"].rolling(20).mean()
+df["vol_sma_20"] = df["Volume"].rolling(20).mean()
+
+# Expoente de Hurst (janela 252)
+def hurst_exp(series: pd.Series, min_lag: int = 2, max_lag: int = 20) -> float:
+    """Calcula o expoente de Hurst via R/S."""
+    ts = np.array(series.dropna())
+    if len(ts) < max_lag:
+        return 0.5
+    lags  = range(min_lag, max_lag)
+    tau   = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    if all(t == 0 for t in tau):
+        return 0.5
+    poly  = np.polyfit(np.log(lags), np.log(tau), 1)
+    return poly[0] * 2.0
+
+hurst_values = []
+win = 252
+for i in range(len(df)):
+    if i < win:
+        hurst_values.append(np.nan)
+    else:
+        h = hurst_exp(df["Retorno"].iloc[i - win : i])
+        hurst_values.append(h)
+df["hurst_252"] = hurst_values
+
+print("Features calculadas.")
+
+# ──────────────────────────────────────────
+# 3. MAPEAMENTO PARA NOMES DO NOTEBOOK (pt-BR)
+# ──────────────────────────────────────────
+rename_map = {
+    "ibov_ret"     : "Retorno Ibovespa",
+    "vix"          : "VIX",
+    "dolar_ret"    : "Retorno Dólar",
+    "bb_pct"       : "Bollinger %",
+    "bb_width"     : "Bollinger Largura",
+    "macd"         : "MACD",
+    "macd_hist"    : "MACD Histograma",
+    "rsi_14"       : "RSI 14",
+    "atr_14"       : "ATR 14",
+    "volatility_5" : "Volatilidade 5",
+    "volatility_10": "Volatilidade 10",
+    "volatility_20": "Volatilidade 20",
+    "Volume"       : "Volume",
+    "vol_rel"      : "Volume Relativo",
+    "vol_sma_20"   : "Volume MMS 20",
+    "return_lag_1" : "Retorno Lag 1",
+    "return_lag_2" : "Retorno Lag 2",
+    "return_lag_3" : "Retorno Lag 3",
+    "return_lag_5" : "Retorno Lag 5",
+    "return_lag_10": "Retorno Lag 10",
+    "return_lag_20": "Retorno Lag 20",
+    "sma_200"      : "MMS 200",
+    "ema_5"        : "MME 5",
+    "ema_20"       : "MME 20",
+    "hurst_252"    : "Hurst 252",
+}
+
+df = df.rename(columns=rename_map)
+
+FEATURES_25 = [
+    "Retorno Ibovespa", "VIX", "Retorno Dólar",
+    "Bollinger %", "Bollinger Largura", "MACD", "MACD Histograma",
+    "RSI 14", "ATR 14",
+    "Volatilidade 5", "Volatilidade 10", "Volatilidade 20",
+    "Volume", "Volume Relativo", "Volume MMS 20",
+    "Retorno Lag 1", "Retorno Lag 2", "Retorno Lag 3",
+    "Retorno Lag 5", "Retorno Lag 10", "Retorno Lag 20",
+    "MMS 200", "MME 5", "MME 20",
+    "Hurst 252",
 ]
 
-def hurst_exponent(series, min_lag=2, max_lag=20):
-    lags = range(min_lag, max_lag)
-    tau  = [np.std(np.subtract(series[lag:], series[:-lag])) for lag in lags]
-    poly = np.polyfit(np.log(lags), np.log(tau), 1)
-    return poly[0]
+df_feat = df[FEATURES_25 + ["Retorno", "Close"]].dropna().copy()
+print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES_25)} features")
 
-def next_business_day(date_str):
-    d = datetime.strptime(date_str, '%Y-%m-%d') + timedelta(days=1)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d.strftime('%Y-%m-%d')
+# ──────────────────────────────────────────
+# 4. NORMALIZAÇÃO + MODELOS
+# ──────────────────────────────────────────
+print("Carregando scalers e modelos...")
 
-def compute_features(df):
-    d = df.copy()
-    d['Retorno'] = d['Close'].pct_change()
-    for lag in [1, 2, 3, 5, 10, 20]:
-        d[f'Retorno Lag {lag}'] = d['Retorno'].shift(lag)
-    d['MMS 200'] = d['Close'].rolling(200).mean()
-    d['MME 5']   = d['Close'].ewm(span=5).mean()
-    d['MME 20']  = d['Close'].ewm(span=20).mean()
-    for w in [5, 10, 20]:
-        d[f'Volatilidade {w}'] = d['Retorno'].rolling(w).std()
-    sma20 = d['Close'].rolling(20).mean()
-    std20 = d['Close'].rolling(20).std()
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
-    d['Bollinger %']       = (d['Close'] - lower) / (upper - lower)
-    d['Bollinger Largura'] = (upper - lower) / sma20
-    ema12 = d['Close'].ewm(span=12).mean()
-    ema26 = d['Close'].ewm(span=26).mean()
-    d['MACD']            = ema12 - ema26
-    d['MACD Histograma'] = d['MACD'] - d['MACD'].ewm(span=9).mean()
-    delta = d['Close'].diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    d['RSI 14'] = 100 - (100 / (1 + gain / loss))
-    hl  = d['High'] - d['Low']
-    hcp = (d['High'] - d['Close'].shift()).abs()
-    lcp = (d['Low']  - d['Close'].shift()).abs()
-    tr  = pd.concat([hl, hcp, lcp], axis=1).max(axis=1)
-    d['ATR 14']          = tr.rolling(14).mean()
-    d['Volume MMS 20']   = d['Volume'].rolling(20).mean()
-    d['Volume Relativo'] = d['Volume'] / d['Volume MMS 20']
-    d['Hurst 252'] = d['Retorno'].rolling(LOOKBACK).apply(
-        lambda x: hurst_exponent(x.dropna()) if len(x.dropna()) >= 20 else np.nan, raw=False)
-    return d
+scaler_X = joblib.load("scaler_X.pkl")
+scaler_y = joblib.load("scaler_y.pkl")
+model_xgb = joblib.load("model_xgb.pkl")
 
-def run():
-    print('Carregando modelos...')
-    model_xgb  = joblib.load('model_xgb.pkl')
-    import json
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+# LSTM — tenta h5 primeiro, depois format SavedModel
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import tensorflow as tf
 
-# Reconstrói o modelo do zero e carrega os pesos
-with open('lstm_config.json', 'r') as f:
-    config = json.load(f)
+if os.path.exists("model_lstm.h5"):
+    model_lstm = tf.keras.models.load_model("model_lstm.h5", compile=False)
+elif os.path.exists("model_lstm"):
+    model_lstm = tf.keras.models.load_model("model_lstm", compile=False)
+else:
+    raise FileNotFoundError("Modelo LSTM não encontrado (model_lstm.h5 ou model_lstm/)")
 
-model_lstm = Sequential([
-    LSTM(128, input_shape=(1, len(FEATURES)), return_sequences=True),
-    BatchNormalization(),
-    Dropout(0.3),
-    LSTM(64, return_sequences=True),
-    BatchNormalization(),
-    Dropout(0.2),
-    LSTM(32, return_sequences=False),
-    BatchNormalization(),
-    Dropout(0.2),
-    Dense(32, activation='relu'),
-    Dense(16, activation='relu'),
-    Dense(1)
-])
+X_all    = df_feat[FEATURES_25].values
+X_sc     = scaler_X.transform(X_all)
+X_lstm   = X_sc.reshape((X_sc.shape[0], 1, X_sc.shape[1]))
 
-model_lstm.load_weights('lstm_weights.weights.h5')
-    scaler_X   = joblib.load('scaler_X.pkl')
-    scaler_y   = joblib.load('scaler_y.pkl')
+# Previsões
+pred_xgb_sc  = model_xgb.predict(X_sc)
+pred_lstm_sc = model_lstm.predict(X_lstm, verbose=0).ravel()
 
-    print('Baixando dados...')
-    end   = datetime.today() + timedelta(days=1)
-    start = end - timedelta(days=700)
+pred_xgb  = scaler_y.inverse_transform(pred_xgb_sc.reshape(-1, 1)).ravel()
+pred_lstm = scaler_y.inverse_transform(pred_lstm_sc.reshape(-1, 1)).ravel()
 
-    itub = yf.download(TICKER, start=start, end=end, progress=False)
-    itub.columns = itub.columns.get_level_values(0)
+# Ponderação pelo Hurst
+hurst = df_feat["Hurst 252"].values
+hurst = np.clip(hurst, 0, 1)
+peso_lstm = hurst
+peso_xgb  = 1 - hurst
+pred_hybrid = peso_xgb * pred_xgb + peso_lstm * pred_lstm
 
-    ibov  = yf.download('^BVSP', start=start, end=end, progress=False)['Close'].pct_change().rename('Retorno Ibovespa')
-    vix   = yf.download('^VIX',  start=start, end=end, progress=False)['Close'].rename('VIX')
-    dolar = yf.download('BRL=X', start=start, end=end, progress=False)['Close'].pct_change().rename('Retorno Dólar')
+print("Previsões calculadas.")
 
-    df = compute_features(itub).join(ibov).join(vix).join(dolar)
-    df = df.dropna(subset=FEATURES + ['Retorno'])
+# ──────────────────────────────────────────
+# 5. MONTA data.json
+# ──────────────────────────────────────────
+# Mantém os últimos 252 pregões (≈ 1 ano de histórico)
+n_hist = 252
+df_out = df_feat.iloc[-n_hist:].copy()
+pred_h = pred_hybrid[-n_hist:]
+hurst_h = hurst[-n_hist:]
 
-    latest   = df.iloc[-1]
-    date_str = latest.name.strftime('%Y-%m-%d') if hasattr(latest.name, 'strftime') else str(latest.name)[:10]
-    price    = float(latest['Close'])
-    real_ret = float(latest['Retorno'])
-    H        = float(latest['Hurst 252'])
+# A previsão do dia D é para D+1 (retorno real do dia seguinte)
+# pred[i] foi gerada com features de D, observamos real em D+1
+real_returns = df_out["Retorno"].values
 
-    X_raw        = latest[FEATURES].values.reshape(1, -1)
-    X_sc         = scaler_X.transform(X_raw)
-    pred_xgb_sc  = model_xgb.predict(X_sc)
-    pred_xgb     = float(scaler_y.inverse_transform(pred_xgb_sc.reshape(-1,1)).ravel()[0])
-    X_lstm       = X_sc.reshape(1, 1, X_sc.shape[1])
-    pred_lstm_sc = model_lstm.predict(X_lstm, verbose=0).ravel()
-    pred_lstm    = float(scaler_y.inverse_transform(pred_lstm_sc.reshape(-1,1)).ravel()[0])
-    pred_hybrid  = (1 - H) * pred_xgb + H * pred_lstm
+records = []
+for i, (idx, row) in enumerate(df_out.iterrows()):
+    records.append({
+        "date" : idx.strftime("%Y-%m-%d"),
+        "price": round(float(row["Close"]), 2),
+        "real" : round(float(real_returns[i]), 6),
+        "pred" : round(float(pred_h[i]), 6),
+        "hurst": round(float(hurst_h[i]), 4),
+    })
 
-    next_date  = next_business_day(date_str)
-    pred_price = round(price * (1 + pred_hybrid), 2)
+# Salva
+with open("data.json", "w") as f:
+    json.dump(records, f, ensure_ascii=False)
 
-    print(f'Data referência  : {date_str}')
-    print(f'Fechamento       : R$ {price:.2f}')
-    print(f'Retorno real     : {real_ret:.4%}')
-    print(f'Previsão D+1     : {pred_hybrid:.4%}')
-    print(f'Fechamento prev. : R$ {pred_price:.2f}')
-    print(f'Próximo dia útil : {next_date}')
-    print(f'Hurst            : {H:.3f}')
-
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            history = json.load(f)
-    else:
-        history = []
-
-    if not any(d['date'] == date_str for d in history):
-        history.append({
-            'date'      : date_str,
-            'price'     : round(price, 2),
-            'real'      : round(real_ret, 6),
-            'pred'      : round(pred_hybrid, 6),
-            'pred_price': pred_price,
-            'next_date' : next_date,
-            'hurst'     : round(H, 4)
-        })
-
-    history = sorted(history, key=lambda x: x['date'])[-MAX_HISTORY:]
-
-    with open(DATA_FILE, 'w') as f:
-        json.dump(history, f, indent=2)
-
-    print(f'data.json atualizado com {len(history)} registros.')
-
-if __name__ == '__main__':
-    run()
+latest = records[-1]
+print(f"\n✓ data.json salvo — {len(records)} registros")
+print(f"  Última data   : {latest['date']}")
+print(f"  Preço         : R$ {latest['price']:.2f}")
+print(f"  Retorno real  : {latest['real']*100:+.2f}%")
+print(f"  Previsão D+1  : {latest['pred']*100:+.2f}%")
+print(f"  Hurst         : {latest['hurst']:.3f}")
+print(f"  Direção       : {'↑ Alta' if latest['pred'] >= 0 else '↓ Queda'}")
