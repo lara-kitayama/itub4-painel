@@ -3,5 +3,5 @@ pandas
 yfinance>=0.2.40
 scikit-learn>=1.6
 xgboost>=2.0
-tensorflow>=2.13
+tensorflow>=2.13,<2.17
 joblib>=1.3
