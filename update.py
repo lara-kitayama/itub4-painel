@@ -448,7 +448,7 @@ for i, m in enumerate(models_xgb):
     m.save_model(f"model_xgb_{i}.json")
 
 # Salva último modelo LSTM (representativo)
-model_lstm.save("model_lstm.h5")
+model_lstm.save("model_lstm.keras")
 print("Modelos e scalers salvos.")
 
 # ──────────────────────────────────────────
