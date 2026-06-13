@@ -1,23 +1,27 @@
 """
 update.py — Atualização diária ITUB4
-Modelo fiel ao TCC: X[i] → y[i] (mesmo dia), 25 features com Hurst,
-ponderação híbrida XGBoost + LSTM pelo Expoente de Hurst.
-
-CORREÇÕES EM RELAÇÃO AO ORIGINAL:
-  1. Hurst: removida raiz quadrada errada (era sqrt(std), correto é std)
-  2. real=None tratado no print final
+Modelo fiel ao TCC final:
+  - XGBoost: binary:logistic (classificação direcional)
+  - LSTM: regressão com janela temporal de 10 dias
+  - Híbrido: ponderação assimétrica pelo Expoente de Hurst
+      p(H) = H        se H >= 0.5
+      p(H) = 0.1 * H  se H < 0.5
+  - 26 features (25 originais + OBV)
+  - Ensemble de 10 runs para XGBoost e LSTM
 """
 
 import json
 import warnings
 import os
+import random
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import joblib
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBRegressor
+from sklearn.metrics import accuracy_score
+import xgboost as xgb
 
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -53,86 +57,101 @@ itub4["Retorno"] = itub4["Close"].pct_change()
 print(f"ITUB4: {itub4.shape[0]} pregões — {itub4.index[0].date()} → {itub4.index[-1].date()}")
 
 # ──────────────────────────────────────────
-# 2. FEATURE ENGINEERING (igual ao TCC)
+# 2. FEATURE ENGINEERING (fiel ao TCC)
+# Todas as features são shiftadas em 1 dia para evitar leakage
 # ──────────────────────────────────────────
 df = itub4.copy()
 
+# Lags de retorno
 for lag in [1, 2, 3, 5, 10, 20]:
     df[f"return_lag_{lag}"] = df["Retorno"].shift(lag)
 
+# Médias móveis
 for w in [5, 10, 20, 50, 200]:
-    df[f"sma_{w}"] = df["Close"].rolling(w).mean()
-
+    df[f"sma_{w}"] = df["Close"].rolling(w).mean().shift(1)
 for w in [5, 10, 20]:
-    df[f"ema_{w}"] = df["Close"].ewm(span=w, adjust=False).mean()
+    df[f"ema_{w}"] = df["Close"].ewm(span=w, adjust=False).mean().shift(1)
 
+# Volatilidade rolling
 for w in [5, 10, 20]:
-    df[f"volatility_{w}"] = df["Retorno"].rolling(w).std()
+    df[f"volatility_{w}"] = df["Retorno"].rolling(w).std().shift(1)
 
+# RSI 14
 delta = df["Close"].diff()
 gain  = delta.clip(lower=0).rolling(14).mean()
 loss  = (-delta.clip(upper=0)).rolling(14).mean()
 rs    = gain / loss
-df["rsi_14"] = 100 - (100 / (1 + rs))
+df["rsi_14"] = (100 - (100 / (1 + rs))).shift(1)
 
+# MACD
 ema12 = df["Close"].ewm(span=12, adjust=False).mean()
 ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-df["macd"]        = ema12 - ema26
-df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-df["macd_hist"]   = df["macd"] - df["macd_signal"]
+macd_raw        = ema12 - ema26
+macd_signal_raw = macd_raw.ewm(span=9, adjust=False).mean()
+df["macd"]        = macd_raw.shift(1)
+df["macd_signal"] = macd_signal_raw.shift(1)
+df["macd_hist"]   = (macd_raw - macd_signal_raw).shift(1)
 
+# Bollinger Bands
 sma20 = df["Close"].rolling(20).mean()
 std20 = df["Close"].rolling(20).std()
-df["bb_upper"] = sma20 + 2 * std20
-df["bb_lower"] = sma20 - 2 * std20
-df["bb_width"] = df["bb_upper"] - df["bb_lower"]
-df["bb_pct"]   = (df["Close"] - df["bb_lower"]) / df["bb_width"]
+bb_upper_raw = sma20 + 2 * std20
+bb_lower_raw = sma20 - 2 * std20
+bb_width_raw = bb_upper_raw - bb_lower_raw
+df["bb_upper"] = bb_upper_raw.shift(1)
+df["bb_lower"] = bb_lower_raw.shift(1)
+df["bb_width"] = bb_width_raw.shift(1)
+df["bb_pct"]   = (df["Close"].shift(1) - bb_lower_raw.shift(1)) / bb_width_raw.shift(1)
 
+# ATR 14
 high_low     = df["Close"].rolling(2).max() - df["Close"].rolling(2).min()
-df["atr_14"] = high_low.rolling(14).mean()
+df["atr_14"] = high_low.rolling(14).mean().shift(1)
 
-df["vol_rel"]    = df["Volume"] / df["Volume"].rolling(20).mean()
-df["vol_sma_20"] = df["Volume"].rolling(20).mean()
+# OBV
+df["obv"] = (np.sign(df["Retorno"]) * df["Volume"]).cumsum().shift(1)
 
+# Volume
+df["vol_rel"]    = (df["Volume"] / df["Volume"].rolling(20).mean()).shift(1)
+df["vol_sma_20"] = df["Volume"].rolling(20).mean().shift(1)
+df["volume"]     = df["Volume"].shift(1)
+
+# Calendário
 df["day_of_week"]    = df.index.dayofweek
 df["month"]          = df.index.month
 df["quarter"]        = df.index.quarter
 df["is_month_start"] = df.index.is_month_start.astype(int)
 df["is_month_end"]   = df.index.is_month_end.astype(int)
 
-df["ibov_ret"]  = ibov_close.pct_change().reindex(df.index)
-df["dolar_ret"] = dolar_close.pct_change().reindex(df.index)
-df["vix"]       = vix_close.reindex(df.index)
+# Contexto de mercado
+df["ibov_ret"]  = ibov_close.pct_change().reindex(df.index).shift(1)
+df["dolar_ret"] = dolar_close.pct_change().reindex(df.index).shift(1)
+df["vix"]       = vix_close.reindex(df.index).shift(1)
 
-# ──────────────────────────────────────────
-# CORREÇÃO 1: Hurst correto (sem sqrt)
-# ──────────────────────────────────────────
-def hurst_exp(series, min_lag=2, max_lag=20):
-    ts = np.array(series.dropna())
-    if len(ts) < max_lag:
-        return 0.5
+# Hurst rolling 252 dias
+def hurst_exp(series, min_lag=2, max_lag=100):
+    ts = np.array(series)
     lags = range(min_lag, max_lag)
     tau  = [np.std(np.subtract(ts[lag:], ts[:-lag])) for lag in lags]
     if all(t == 0 for t in tau):
         return 0.5
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
-    return float(np.clip(poly[0] * 2.0, 0.0, 1.0))
+    return float(np.clip(poly[0], 0.0, 1.0))
 
-print("Calculando Hurst (pode demorar ~30s)...")
+print("Calculando Hurst (pode demorar ~60s)...")
 hurst_values = []
 win = 252
 for i in range(len(df)):
     if i < win:
         hurst_values.append(np.nan)
     else:
-        h = hurst_exp(df["Retorno"].iloc[i - win : i])
+        h = hurst_exp(df["Close"].iloc[i - win : i].values)
         hurst_values.append(h)
-df["hurst_252"] = hurst_values
+df["hurst_252"] = pd.Series(hurst_values, index=df.index).shift(1)
 
 print("Features calculadas.")
 
 # ──────────────────────────────────────────
-# 3. RENOMEIA COLUNAS (igual ao TCC)
+# 3. RENOMEIA E SELECIONA 26 FEATURES DO TCC
 # ──────────────────────────────────────────
 rename_map = {
     "ibov_ret"     : "Retorno Ibovespa",
@@ -147,7 +166,7 @@ rename_map = {
     "volatility_5" : "Volatilidade 5",
     "volatility_10": "Volatilidade 10",
     "volatility_20": "Volatilidade 20",
-    "Volume"       : "Volume",
+    "volume"       : "Volume",
     "vol_rel"      : "Volume Relativo",
     "vol_sma_20"   : "Volume MMS 20",
     "return_lag_1" : "Retorno Lag 1",
@@ -160,12 +179,11 @@ rename_map = {
     "ema_5"        : "MME 5",
     "ema_20"       : "MME 20",
     "hurst_252"    : "Hurst 252",
+    "obv"          : "OBV",
 }
-
 df = df.rename(columns=rename_map)
 
-# 25 features igual ao TCC
-FEATURES_25 = [
+FEATURES = [
     "Retorno Ibovespa", "VIX", "Retorno Dólar",
     "Bollinger %", "Bollinger Largura", "MACD", "MACD Histograma",
     "RSI 14", "ATR 14",
@@ -174,170 +192,306 @@ FEATURES_25 = [
     "Retorno Lag 1", "Retorno Lag 2", "Retorno Lag 3",
     "Retorno Lag 5", "Retorno Lag 10", "Retorno Lag 20",
     "MMS 200", "MME 5", "MME 20",
-    "Hurst 252",
+    "Hurst 252", "OBV",
 ]
 
-df_feat = df[FEATURES_25 + ["Retorno", "Close"]].dropna().copy()
-print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES_25)} features")
+df_feat = df[FEATURES + ["Retorno", "Close"]].dropna().copy()
+print(f"Dataset final: {df_feat.shape[0]} linhas × {len(FEATURES)} features")
 
 # ──────────────────────────────────────────
-# 4. X[i] → y[i] (fiel ao TCC)
+# 4. DIVISÃO TEMPORAL 70/15/15
 # ──────────────────────────────────────────
-X_raw     = df_feat[FEATURES_25].values
-y_raw     = df_feat["Retorno"].values
-hurst_raw = df_feat["Hurst 252"].values
+n          = len(df_feat)
+train_end  = int(n * 0.70)
+val_end    = int(n * 0.85)
 
-# ──────────────────────────────────────────
-# 5. TREINO / TESTE
-# ──────────────────────────────────────────
-split = int(len(X_raw) * 0.8)
-X_train, X_test = X_raw[:split], X_raw[split:]
-y_train, y_test = y_raw[:split], y_raw[split:]
+X_all  = df_feat[FEATURES].values
+y_all  = df_feat["Retorno"].values
+h_all  = df_feat["Hurst 252"].values
 
+X_train = X_all[:train_end];  y_train = y_all[:train_end]
+X_val   = X_all[train_end:val_end]; y_val = y_all[train_end:val_end]
+X_test  = X_all[val_end:];    y_test  = y_all[val_end:]
+h_test  = h_all[val_end:]
+
+# Scaler X
 scaler_X = StandardScaler()
 X_train_sc = scaler_X.fit_transform(X_train)
+X_val_sc   = scaler_X.transform(X_val)
 X_test_sc  = scaler_X.transform(X_test)
+X_all_sc   = scaler_X.transform(X_all)
 
+# Target binário para XGBoost
+y_train_clf = (y_train > 0).astype(int)
+y_val_clf   = (y_val   > 0).astype(int)
+y_test_clf  = (y_test  > 0).astype(int)
+
+# Scaler y para LSTM
 scaler_y = StandardScaler()
 y_train_sc = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
-y_test_sc  = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
-
-n_pos = np.sum(y_train > 0)
-n_neg = np.sum(y_train <= 0)
-print(f"XGBoost — Alta: {n_pos} dias | Queda: {n_neg} dias no treino")
+y_val_sc   = scaler_y.transform(y_val.reshape(-1, 1)).ravel()
 
 # ──────────────────────────────────────────
-# 6. XGBOOST
+# 5. XGBOOST — CLASSIFICAÇÃO BINÁRIA
+#    Ensemble de 10 seeds
 # ──────────────────────────────────────────
-model_xgb = XGBRegressor(
-    n_estimators=500,
-    max_depth=4,
-    learning_rate=0.03,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    min_child_weight=5,
-    gamma=0.1,
-    reg_alpha=0.1,
-    reg_lambda=1.0,
-    random_state=42,
-    n_jobs=-1,
-)
-model_xgb.fit(
-    X_train_sc, y_train_sc,
-    eval_set=[(X_test_sc, y_test_sc)],
-    verbose=False,
-)
-print("XGBoost treinado.")
+print("\nTreinando XGBoost (10 runs)...")
+
+scale_pos = (y_train_clf == 0).sum() / (y_train_clf == 1).sum()
+
+params_xgb = {
+    "objective"        : "binary:logistic",
+    "eval_metric"      : "logloss",
+    "max_depth"        : 3,
+    "learning_rate"    : 0.05,
+    "subsample"        : 0.7,
+    "colsample_bytree" : 0.7,
+    "reg_alpha"        : 0.5,
+    "reg_lambda"       : 2.0,
+    "min_child_weight" : 5,
+    "scale_pos_weight" : scale_pos,
+    "nthread"          : -1,
+}
+
+# Threshold calibrado na validação
+def calibrar_threshold(prob_val, y_val_clf):
+    best_t, best_acc = 0.5, 0.0
+    for p in np.arange(0.40, 0.61, 0.01):
+        acc = accuracy_score(y_val_clf, (prob_val > p).astype(int))
+        if acc > best_acc:
+            best_acc, best_t = acc, p
+    return best_t
+
+prob_val_runs  = []
+prob_test_runs = []
+prob_all_runs  = []
+models_xgb     = []
+
+for seed in range(10):
+    params_xgb["seed"] = seed
+    dtrain = xgb.DMatrix(X_train_sc, label=y_train_clf)
+    dval   = xgb.DMatrix(X_val_sc,   label=y_val_clf)
+    dtest  = xgb.DMatrix(X_test_sc)
+    dall   = xgb.DMatrix(X_all_sc)
+
+    m = xgb.train(
+        params_xgb, dtrain,
+        num_boost_round=2000,
+        evals=[(dval, "val")],
+        early_stopping_rounds=100,
+        verbose_eval=False,
+    )
+    models_xgb.append(m)
+    prob_val_runs.append(m.predict(dval))
+    prob_test_runs.append(m.predict(dtest))
+    prob_all_runs.append(m.predict(dall))
+    print(f"  XGB run {seed+1}/10 — melhor iteração: {m.best_iteration}")
+
+prob_val_xgb  = np.mean(prob_val_runs,  axis=0)
+prob_test_xgb = np.mean(prob_test_runs, axis=0)
+prob_all_xgb  = np.mean(prob_all_runs,  axis=0)
+
+best_thresh = calibrar_threshold(prob_val_xgb, y_val_clf)
+print(f"XGBoost threshold calibrado: {best_thresh:.2f}")
+
+# Previsão contínua centrada em zero para o híbrido
+pred_xgb_test = prob_test_xgb - 0.5
+pred_xgb_all  = prob_all_xgb  - 0.5
+
+acc_xgb = accuracy_score(y_test_clf, (prob_test_xgb > best_thresh).astype(int))
+print(f"XGBoost acurácia teste: {acc_xgb:.2%}")
 
 # ──────────────────────────────────────────
-# 7. LSTM
+# 6. LSTM — REGRESSÃO COM JANELA DE 10 DIAS
+#    Ensemble de 10 seeds
 # ──────────────────────────────────────────
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-X_train_lstm = X_train_sc.reshape((X_train_sc.shape[0], 1, X_train_sc.shape[1]))
-X_test_lstm  = X_test_sc.reshape((X_test_sc.shape[0],  1, X_test_sc.shape[1]))
+WINDOW = 10
 
-model_lstm = Sequential([
-    LSTM(64, input_shape=(1, X_train_sc.shape[1]), return_sequences=True),
-    Dropout(0.2),
-    LSTM(32),
-    Dropout(0.2),
-    Dense(16, activation="relu"),
-    Dense(1),
-])
-model_lstm.compile(optimizer=tf.keras.optimizers.Adam(1e-3), loss="mse")
+def make_seq(X, y, window):
+    Xs, ys = [], []
+    for i in range(window, len(X)):
+        Xs.append(X[i-window:i])
+        ys.append(y[i])
+    return np.array(Xs), np.array(ys)
 
-es = EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True)
-lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=7, min_lr=1e-5)
+# Sequências com overlap nas bordas
+y_train_sc_full = scaler_y.transform(y_train.reshape(-1,1)).ravel()
+y_val_sc_full   = scaler_y.transform(y_val.reshape(-1,1)).ravel()
 
-model_lstm.fit(
-    X_train_lstm, y_train_sc,
-    validation_data=(X_test_lstm, y_test_sc),
-    epochs=100,
-    batch_size=32,
-    callbacks=[es, lr],
-    verbose=1,
-)
-print("LSTM treinado.")
+X_train_lstm, y_train_seq = make_seq(X_train_sc, y_train_sc_full, WINDOW)
+X_val_lstm,   y_val_seq   = make_seq(
+    np.vstack([X_train_sc[-WINDOW:], X_val_sc]),
+    np.concatenate([y_train_sc_full[-WINDOW:], y_val_sc_full]), WINDOW)
+X_test_lstm,  _           = make_seq(
+    np.vstack([X_val_sc[-WINDOW:], X_test_sc]),
+    np.zeros(WINDOW + len(X_test_sc)), WINDOW)
+
+# Sequência completa para previsão histórica
+X_all_lstm_full, _ = make_seq(X_all_sc, np.zeros(len(X_all_sc)), WINDOW)
+
+y_train_orig = y_train[WINDOW:]
+y_val_orig   = y_val
+y_test_orig  = y_test
+
+# Peso para equilibrar quedas no LSTM
+n_pos = (y_train_orig > 0).sum()
+n_neg = (y_train_orig <= 0).sum()
+peso_queda = (n_pos / n_neg) * 1.1
+sample_weights = np.where(y_train_orig <= 0, peso_queda, 1.0)
+
+print("\nTreinando LSTM (10 runs)...")
+
+pred_test_runs_lstm = []
+pred_all_runs_lstm  = []
+
+for seed in range(10):
+    np.random.seed(seed)
+    random.seed(seed)
+    tf.keras.utils.set_random_seed(seed)
+
+    model_lstm = Sequential([
+        LSTM(64, return_sequences=True,
+             input_shape=(WINDOW, X_train_sc.shape[1])),
+        Dropout(0.2),
+        LSTM(32),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(1),
+    ])
+    model_lstm.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss="huber"
+    )
+    model_lstm.fit(
+        X_train_lstm, y_train_seq,
+        sample_weight=sample_weights,
+        validation_data=(X_val_lstm, y_val_seq),
+        epochs=200, batch_size=32, verbose=0,
+        callbacks=[
+            EarlyStopping(patience=20, restore_best_weights=True),
+            ReduceLROnPlateau(patience=8, min_lr=1e-6),
+        ],
+    )
+    pred_test_runs_lstm.append(
+        scaler_y.inverse_transform(
+            model_lstm.predict(X_test_lstm, verbose=0)
+        ).ravel()
+    )
+    pred_all_runs_lstm.append(
+        scaler_y.inverse_transform(
+            model_lstm.predict(X_all_lstm_full, verbose=0)
+        ).ravel()
+    )
+    print(f"  LSTM run {seed+1}/10 concluído")
+
+pred_lstm_test = np.mean(pred_test_runs_lstm, axis=0)
+pred_lstm_all  = np.mean(pred_all_runs_lstm,  axis=0)
+
+dir_acc_lstm = np.mean(np.sign(pred_lstm_test) == np.sign(y_test_orig))
+print(f"LSTM acurácia direcional teste: {dir_acc_lstm:.2%}")
 
 # ──────────────────────────────────────────
-# 8. MÉTRICAS
+# 7. HÍBRIDO — PONDERAÇÃO ASSIMÉTRICA
+#    p(H) = H        se H >= 0.5
+#    p(H) = 0.1 * H  se H < 0.5
 # ──────────────────────────────────────────
-pred_xgb_test  = scaler_y.inverse_transform(
-    model_xgb.predict(X_test_sc).reshape(-1, 1)).ravel()
-pred_lstm_test = scaler_y.inverse_transform(
-    model_lstm.predict(X_test_lstm, verbose=0).reshape(-1, 1)).ravel()
+def peso_hibrido(h):
+    return h if h >= 0.5 else 0.1 * h
 
-hurst_test       = hurst_raw[split:]
-pred_hybrid_test = (1 - hurst_test) * pred_xgb_test + hurst_test * pred_lstm_test
+# Alinha dimensões (LSTM perde WINDOW observações no início)
+n_lstm = len(pred_lstm_test)
+pred_xgb_al = pred_xgb_test[-n_lstm:]
+y_test_al   = y_test_orig[-n_lstm:]
+h_test_al   = h_test[-n_lstm:]
 
-rmse    = np.sqrt(np.mean((pred_hybrid_test - y_test) ** 2))
-mae     = np.mean(np.abs(pred_hybrid_test - y_test))
-dir_acc = np.mean(np.sign(pred_hybrid_test) == np.sign(y_test))
+pesos = np.array([peso_hibrido(h) for h in h_test_al])
+pred_hybrid_test = (1 - pesos) * pred_xgb_al + pesos * pred_lstm_test
 
-print(f"\n📊 Métricas no conjunto de teste:")
-print(f"   RMSE            : {rmse:.4f}")
-print(f"   MAE             : {mae:.4f}")
-print(f"   Dir. Accuracy   : {dir_acc*100:.2f}%")
-print(f"   % previsões Alta      : {np.mean(pred_hybrid_test > 0)*100:.1f}%")
-print(f"   % retornos reais Alta : {np.mean(y_test > 0)*100:.1f}%")
+dir_acc_hybrid = np.mean(np.sign(pred_hybrid_test) == np.sign(y_test_al))
+rmse_hybrid    = np.sqrt(np.mean((pred_hybrid_test - y_test_al) ** 2))
+mae_hybrid     = np.mean(np.abs(pred_hybrid_test - y_test_al))
 
-# ──────────────────────────────────────────
-# 9. PREVISÕES EM TODO O DATASET
-# ──────────────────────────────────────────
-X_all_sc   = scaler_X.transform(X_raw)
-X_all_lstm = X_all_sc.reshape((X_all_sc.shape[0], 1, X_all_sc.shape[1]))
-
-pred_xgb_all  = scaler_y.inverse_transform(
-    model_xgb.predict(X_all_sc).reshape(-1, 1)).ravel()
-pred_lstm_all = scaler_y.inverse_transform(
-    model_lstm.predict(X_all_lstm, verbose=0).reshape(-1, 1)).ravel()
-
-pred_hybrid_all = (1 - hurst_raw) * pred_xgb_all + hurst_raw * pred_lstm_all
+print(f"\n📊 Métricas — conjunto de teste:")
+print(f"   XGBoost Dir.Acc  : {acc_xgb:.2%}")
+print(f"   LSTM    Dir.Acc  : {dir_acc_lstm:.2%}")
+print(f"   Híbrido Dir.Acc  : {dir_acc_hybrid:.2%}")
+print(f"   Híbrido RMSE     : {rmse_hybrid:.4f}")
+print(f"   Híbrido MAE      : {mae_hybrid:.4f}")
 
 # ──────────────────────────────────────────
-# 10. SALVA MODELOS
+# 8. PREVISÕES HISTÓRICAS COMPLETAS
+# ──────────────────────────────────────────
+n_lstm_all = len(pred_lstm_all)
+pred_xgb_all_al  = pred_xgb_all[-n_lstm_all:]
+h_all_al         = h_all[-n_lstm_all:]
+y_all_al         = y_all[-n_lstm_all:]
+dates_all        = df_feat.index[-n_lstm_all:]
+prices_all       = df_feat["Close"].values[-n_lstm_all:]
+
+pesos_all       = np.array([peso_hibrido(h) for h in h_all_al])
+pred_hybrid_all = (1 - pesos_all) * pred_xgb_all_al + pesos_all * pred_lstm_all
+
+# ──────────────────────────────────────────
+# 9. SALVA MODELOS E SCALERS
 # ──────────────────────────────────────────
 joblib.dump(scaler_X, "scaler_X.pkl")
 joblib.dump(scaler_y, "scaler_y.pkl")
-joblib.dump(model_xgb, "model_xgb.pkl")
+joblib.dump(best_thresh, "xgb_threshold.pkl")
+
+# Salva os 10 modelos XGBoost
+for i, m in enumerate(models_xgb):
+    m.save_model(f"model_xgb_{i}.json")
+
+# Salva último modelo LSTM (representativo)
 model_lstm.save("model_lstm.h5")
 print("Modelos e scalers salvos.")
 
 # ──────────────────────────────────────────
-# 11. MONTA data.json
-#
-# pred[i] = previsão do modelo para o dia i (com features do dia i)
-# real[i] = retorno que ocorreu no dia i
-# O painel usa pred[i] como "o que o modelo previu ontem para hoje"
-# e pred[último] como previsão para amanhã (D+1)
+# 10. MONTA data.json
 # ──────────────────────────────────────────
-n_hist = 252
-idx_start = max(0, len(df_feat) - n_hist)
+n_hist    = 252
+idx_start = max(0, n_lstm_all - n_hist)
 
 records = []
-for k in range(idx_start, len(df_feat)):
+for k in range(idx_start, n_lstm_all):
     records.append({
-        "date" : df_feat.index[k].strftime("%Y-%m-%d"),
-        "price": round(float(df_feat["Close"].iloc[k]), 2),
-        "real" : round(float(y_raw[k]), 6),
+        "date" : dates_all[k].strftime("%Y-%m-%d"),
+        "price": round(float(prices_all[k]), 2),
+        "real" : round(float(y_all_al[k]), 6),
         "pred" : round(float(pred_hybrid_all[k]), 6),
-        "hurst": round(float(hurst_raw[k]), 4),
+        "hurst": round(float(h_all_al[k]), 4),
     })
 
-# Registro D+1: previsão para o próximo pregão
+# D+1: previsão para o próximo pregão
 from pandas.tseries.offsets import BDay
 proximo_dia = (df_feat.index[-1] + BDay(1)).strftime("%Y-%m-%d")
+
+# Usa as features do último dia disponível
+x_last    = X_all_sc[[-1]]
+h_last    = float(h_all[-1])
+p_last    = peso_hibrido(h_last)
+
+prob_last_xgb = np.mean([m.predict(xgb.DMatrix(x_last))[0] for m in models_xgb])
+# LSTM: usa a última janela de 10 dias
+x_last_seq = X_all_sc[-WINDOW:].reshape(1, WINDOW, X_all_sc.shape[1])
+pred_last_lstm = float(scaler_y.inverse_transform(
+    model_lstm.predict(x_last_seq, verbose=0)
+).ravel()[0])
+
+pred_last_xgb    = float(prob_last_xgb) - 0.5
+pred_last_hybrid = (1 - p_last) * pred_last_xgb + p_last * pred_last_lstm
 
 records.append({
     "date" : proximo_dia,
     "price": round(float(df_feat["Close"].iloc[-1]), 2),
     "real" : None,
-    "pred" : round(float(pred_hybrid_all[-1]), 6),
-    "hurst": round(float(hurst_raw[-1]), 4),
+    "pred" : round(float(pred_last_hybrid), 6),
+    "hurst": round(h_last, 4),
 })
 
 with open("data.json", "w") as f:
