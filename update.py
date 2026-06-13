@@ -295,8 +295,10 @@ best_thresh = calibrar_threshold(prob_val_xgb, y_val_clf)
 print(f"XGBoost threshold calibrado: {best_thresh:.2f}")
 
 # Previsão contínua centrada em zero para o híbrido
-pred_xgb_test = prob_test_xgb - 0.5
-pred_xgb_all  = prob_all_xgb  - 0.5
+# Escala ajustada para compatibilidade com o LSTM (mesma ordem de grandeza do retorno)
+escala_xgb    = float(np.std(y_train)) * 0.1
+pred_xgb_test = (prob_test_xgb - 0.5) * escala_xgb
+pred_xgb_all  = (prob_all_xgb  - 0.5) * escala_xgb
 
 acc_xgb = accuracy_score(y_test_clf, (prob_test_xgb > best_thresh).astype(int))
 print(f"XGBoost acurácia teste: {acc_xgb:.2%}")
@@ -483,7 +485,7 @@ pred_last_lstm = float(scaler_y.inverse_transform(
     model_lstm.predict(x_last_seq, verbose=0)
 ).ravel()[0])
 
-pred_last_xgb    = float(prob_last_xgb) - 0.5
+pred_last_xgb    = (float(prob_last_xgb) - 0.5) * escala_xgb
 pred_last_hybrid = (1 - p_last) * pred_last_xgb + p_last * pred_last_lstm
 
 records.append({
