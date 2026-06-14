@@ -597,7 +597,7 @@ function renderDashboard(data) {
             return `<tr>
               <td>${fmtDate(d.date)}</td>
               <td>${fmtPrice(d.price)}</td>
-              <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmtPrice(d.price * (1 + d.pred))}</td>
+              <td style="color:...">${i < [...data].reverse().length - 1 ? fmtPrice([...data].reverse()[i+1].price * (1 + d.pred)) : '—'}</td>
               <td style="color:${d.real !== null && d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
               <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
               <td><span class="badge ${dirClass(d.pred)}">${dirLabel(d.pred)}</span></td>
