@@ -332,13 +332,8 @@ let currentRange = 30;
 function nextBusinessDay(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
   d.setDate(d.getDate() + 1);
-  while (d.getDay() === 0 || d.getDay() === 6) {
-    d.setDate(d.getDate() + 1);
-  }
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function fmt(v) {
@@ -349,9 +344,7 @@ function fmtDate(d) {
   const [y, m, day] = d.split('-');
   return `${day}/${m}/${y}`;
 }
-function fmtPrice(v) {
-  return 'R$ ' + v.toFixed(2);
-}
+function fmtPrice(v) { return 'R$ ' + v.toFixed(2); }
 function dirClass(v) { return v >= 0 ? 'up' : 'down'; }
 function dirLabel(v) { return v >= 0 ? '↑ Alta' : '↓ Queda'; }
 function dirIcon(v)  { return v >= 0 ? '↑' : '↓'; }
@@ -426,13 +419,10 @@ function updateChart() {
 function renderDashboard(data) {
   globalData = data;
 
-  // Último registro com real preenchido = D0
   const dataComReal = data.filter(d => d.real !== null && d.real !== undefined);
   const today       = dataComReal[dataComReal.length - 1];
   const yesterday   = dataComReal.length > 1 ? dataComReal[dataComReal.length - 2] : null;
-
-  // Registro D+1 (real = null)
-  const nextDay = data[data.length - 1].real === null ? data[data.length - 1] : null;
+  const nextDay     = data[data.length - 1].real === null ? data[data.length - 1] : null;
 
   document.getElementById('last-update').textContent = `Atualizado em ${fmtDate(today.date)}`;
 
@@ -446,10 +436,38 @@ function renderDashboard(data) {
   const d0Pred      = yesterday ? yesterday.pred : null;
   const d0PredPrice = yesterday ? yesterday.price * (1 + yesterday.pred) : null;
 
-  // Acerto: compara pred e real do mesmo dia (today)
   const d0Hit = (d0Real !== null && d0Real !== undefined && today.pred !== null)
     ? (Math.sign(d0Real) === Math.sign(today.pred))
     : null;
+
+  // ── Tabela histórica ──────────────────────────────────────────
+  // reversed[i] = dia atual na linha i (mais recente primeiro)
+  // O fechamento previsto de reversed[i] foi feito com base no
+  // preço de reversed[i+1] (o dia anterior na ordem cronológica)
+  const reversed = [...data].reverse().slice(0, 15);
+  const tableRows = reversed.map((d, i) => {
+    const acertou      = (d.real === null || d.real === undefined)
+      ? 'pending'
+      : (Math.sign(d.real) === Math.sign(d.pred) ? 'hit' : 'miss');
+    const acertouLabel = acertou === 'hit' ? '✓' : acertou === 'miss' ? '✗' : '—';
+
+    // Preço base = fechamento do dia ANTERIOR (próximo na lista invertida)
+    const prevEntry    = reversed[i + 1];
+    const fechPrevisto = prevEntry
+      ? fmtPrice(prevEntry.price * (1 + d.pred))
+      : '—';
+    const fechPrevistoColor = d.pred >= 0 ? 'var(--up)' : 'var(--down)';
+
+    return `<tr>
+      <td>${fmtDate(d.date)}</td>
+      <td>${fmtPrice(d.price)}</td>
+      <td style="color:${fechPrevistoColor}">${fechPrevisto}</td>
+      <td style="color:${d.real !== null && d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
+      <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
+      <td><span class="badge ${dirClass(d.pred)}">${dirLabel(d.pred)}</span></td>
+      <td><span class="badge ${acertou}">${acertouLabel}</span></td>
+    </tr>`;
+  }).join('');
 
   document.getElementById('main-content').innerHTML = `
 
@@ -536,23 +554,23 @@ function renderDashboard(data) {
     <div class="metrics-grid">
       <div class="metric-card">
         <div class="metric-label">RMSE (Teste)</div>
-        <div class="metric-value">0,0058</div>
+        <div class="metric-value">0,0134</div>
         <div class="metric-sub">modelo híbrido</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">MAE (Teste)</div>
-        <div class="metric-value">0,0041</div>
+        <div class="metric-value">0,0103</div>
         <div class="metric-sub">modelo híbrido</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Dir. Accuracy</div>
-        <div class="metric-value">85,82%</div>
+        <div class="metric-value">55,38%</div>
         <div class="metric-sub">conjunto de teste</div>
       </div>
       <div class="metric-card">
         <div class="metric-label">Hurst Atual</div>
-        <div class="metric-value">${today.hurst.toFixed(3)}</div>
-        <div class="metric-sub">${today.hurst >= 0.5 ? 'Persistente (H ≥ 0,5)' : 'Anti-persistente (H < 0,5)'}</div>
+        <div class="metric-value" id="hurst-val">—</div>
+        <div class="metric-sub" id="hurst-label">—</div>
       </div>
     </div>
 
@@ -588,26 +606,13 @@ function renderDashboard(data) {
             <th>Acertou?</th>
           </tr>
         </thead>
-        <tbody>
-          ${[...data].reverse().slice(0, 15).map((d) => {
-            const acertou = (d.real === null || d.real === undefined)
-              ? 'pending'
-              : (Math.sign(d.real) === Math.sign(d.pred) ? 'hit' : 'miss');
-            const acertouLabel = acertou === 'hit' ? '✓' : acertou === 'miss' ? '✗' : '—';
-            return `<tr>
-              <td>${fmtDate(d.date)}</td>
-              <td>${fmtPrice(d.price)}</td>
-              <td style="color:...">${i < [...data].reverse().length - 1 ? fmtPrice([...data].reverse()[i+1].price * (1 + d.pred)) : '—'}</td>
-              <td style="color:${d.real !== null && d.real >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.real)}</td>
-              <td style="color:${d.pred >= 0 ? 'var(--up)' : 'var(--down)'}">${fmt(d.pred)}</td>
-              <td><span class="badge ${dirClass(d.pred)}">${dirLabel(d.pred)}</span></td>
-              <td><span class="badge ${acertou}">${acertouLabel}</span></td>
-            </tr>`;
-          }).join('')}
-        </tbody>
+        <tbody>${tableRows}</tbody>
       </table>
     </div>
   `;
+
+  document.getElementById('hurst-val').textContent   = today.hurst.toFixed(3);
+  document.getElementById('hurst-label').textContent = today.hurst >= 0.5 ? 'Persistente (H ≥ 0,5)' : 'Anti-persistente (H < 0,5)';
 
   updateChart();
 }
